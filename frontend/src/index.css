@@ -1,0 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Outfit", sans-serif;
+  color: #e2e8f0;
+  background: #020617;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: #020617;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.glass-card {
+  @apply bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-xl shadow-slate-950/20;
+}
+
+.glow-indigo {
+  @apply shadow-[0_0_15px_-3px_rgba(99,102,241,0.15)];
+}
+
+.glow-emerald {
+  @apply shadow-[0_0_15px_-3px_rgba(16,185,129,0.15)];
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 0.6;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2.4s ease-in-out infinite;
+}

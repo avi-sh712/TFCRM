@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from fastapi import HTTPException
+from jose import jwt
+
+from talentforge import auth, graph_engine, ingestion
+
+
+JWT_SECRET = "t" * 48
+WEBHOOK_SECRET = "w" * 48
+
+
+def _jwt_token(*, expires_at: datetime, role: str = "csm") -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": str(uuid4()),
+            "role": role,
+            "scope": f"role:{role}",
+            "type": "access",
+            "iss": "talentforge-api",
+            "aud": "talentforge-api",
+            "iat": now,
+            "nbf": now,
+            "exp": expires_at,
+            "jti": str(uuid4()),
+        },
+        JWT_SECRET,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+
+
+def test_auth_decodes_valid_jwt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(auth.JWT_SECRET_KEY_ENV, JWT_SECRET)
+    token = _jwt_token(expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+
+    claims = auth._decode_access_token(token)
+
+    assert claims.role.value == "csm"
+
+
+def test_auth_rejects_expired_jwt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(auth.JWT_SECRET_KEY_ENV, JWT_SECRET)
+    token = _jwt_token(expires_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+
+    with pytest.raises(HTTPException) as raised:
+        auth._decode_access_token(token)
+
+    assert raised.value.status_code == 401
+
+
+def test_webhook_hmac_sha256_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ingestion.WEBHOOK_SECRET_ENV, WEBHOOK_SECRET)
+    body = b'{"event_type":"error","customer_id":"00000000-0000-0000-0000-000000000001"}'
+    signature = hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+
+    ingestion._verify_webhook_signature(body, f"sha256={signature}")
+
+    with pytest.raises(HTTPException) as raised:
+        ingestion._verify_webhook_signature(body, "0" * 64)
+    assert raised.value.status_code == 401
+
+
+def test_duplicate_idempotency_key_is_blocked_within_hour() -> None:
+    customer_id = uuid4()
+    hour = datetime(2026, 7, 14, 10, tzinfo=timezone.utc)
+
+    first_key = ingestion.build_idempotency_key(customer_id, "timeout", hour)
+    duplicate_key = ingestion.build_idempotency_key(customer_id, "timeout", hour)
+    next_hour_key = ingestion.build_idempotency_key(
+        customer_id,
+        "timeout",
+        hour + timedelta(hours=1),
+    )
+
+    assert first_key == duplicate_key
+    assert first_key != next_hour_key
+
+
+def test_graph_escalates_at_retry_ceiling_without_another_retry() -> None:
+    state = graph_engine.make_initial_state("customer-1", {}, max_retries=3)
+    state["retry_count"] = 3
+    state["tool_errors"] = ["Read-only customer history retrieval failed or timed out."]
+
+    route = graph_engine.TalentForgeGraphEngine._route_after_tool_call(state)
+
+    assert route == "escalate"
+    assert route != "retry"

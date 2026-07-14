@@ -11,6 +11,7 @@ from typing import Final
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from talentforge.campaigns import router as campaigns_router
 from talentforge.db.database import close_database, init_database
 from talentforge.ingestion import router as ingestion_router
 
@@ -77,6 +78,7 @@ app.add_middleware(
 )
 
 app.include_router(ingestion_router)
+app.include_router(campaigns_router)
 
 
 @app.get("/healthz", include_in_schema=False)
