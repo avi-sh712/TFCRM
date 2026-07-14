@@ -1,0 +1,9 @@
+asyncpg>=0.29.0
+fastapi>=0.115.0
+langchain-mcp-adapters>=0.3.0,<0.4.0
+passlib[bcrypt]>=1.7.4
+pgvector>=0.3.0
+python-jose[cryptography]>=3.3.0
+sqlalchemy[asyncio]>=2.0.30
+sqlmodel>=0.0.22
+uvicorn[standard]>=0.30.0
