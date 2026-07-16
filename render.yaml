@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: talentforge-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ISSUER
+        value: talentforge-api
+      - key: JWT_AUDIENCE
+        value: talentforge-api
+      - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "15"
+      - key: FRONTEND_URL
+        sync: false
+      - key: TALENTFORGE_PRODUCTION_FRONTEND_ORIGIN
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        generateValue: true
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TALENTFORGE_ROUTING_MODEL
+        value: gpt-4o-mini
+      - key: TALENTFORGE_FRONTIER_MODEL
+        value: gpt-4o
+      - key: TALENTFORGE_CHECKPOINTER_MODE
+        value: postgres
+      - key: POSTGRES_MCP_TRANSPORT
+        value: http
+      - key: POSTGRES_MCP_URL
+        sync: false
+      - key: POSTGRES_MCP_AUTH_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false

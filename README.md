@@ -1,155 +1,278 @@
-# TalentForge – The Autonomous Customer Success & Churn Mitigation Hub
+# TalentForge CRM
 
-TalentForge is a production-grade, loop-guarded, autonomous customer success and churn mitigation hub. It ingests platform telemetry events, evaluates them against a high-speed semantic cache using pgvector, queries read-only data tools via a secure Model Context Protocol (MCP) gateway, reasons over incident context using a tiered LangGraph state machine, streams live traces in real-time via WebSockets, and stages tailored customer outreach drafts in a dashboard for mandatory human review and delivery via Resend.
+TalentForge is a customer-success CRM for teams that need to keep customer data, deal progress, product signals, AI analysis, and outreach approval in one place. It combines everyday CRM work with guarded AI assistance for churn detection and customer follow-up.
 
----
+The AI never sends customer email on its own. It can analyze selected customers, summarize evidence, draft outreach, and queue campaigns, but a CSM or Admin must approve delivery.
 
-## 🏗️ Architectural Topology
+## What It Does
 
-```mermaid
-graph TD
-    A[Telemetry Event] -->|HMAC SHA256| B(FastAPI Ingestion Gateway)
-    B -->|MD5 Hour-Bucket Deduplication| C{Idempotency Guard}
-    C -->|Duplicate| D[Reject Payload]
-    C -->|New| E[Neon PostgreSQL DB]
-    E -->|Cosine Similarity Search| F{Semantic Cache Hit?}
-    F -->|Yes: Similarity >= 95%| G[Reuse Cached Resolution]
-    F -->|No| H[LangGraph State Swarm]
-    
-    H -->|Read-only Postgres MCP Client| I[Postgres CRM Data]
-    H -->|GPT-5.6 Routing & Frontier reasoning| J[Root-Cause Analysis]
-    H -->|Durable Persistence| K[PostgreSQL Checkpointer]
-    
-    J -->|Stage pending_review| L[OutreachCampaign Table]
-    L -->|Real-time streams| M[Vite + React Dashboard]
-    M -->|Human Review & Approval| N[Resend Email Gateway]
+- Store customers, email, phone, MRR, lifetime value, purchase count, health scores, tags, notes, and interaction history.
+- Import customer lists from CSV files.
+- Maintain a sales/customer-success deal pipeline.
+- Receive signed product events through webhooks.
+- Run AI churn, root-cause, outreach, and health-score jobs.
+- Show selected customers on a positive-to-critical health spectrum with evidence from interaction history.
+- Create outreach campaigns and require human approval before Resend sends them.
+- Keep AI database access read-only through Postgres MCP.
+
+## Who It Helps Most
+
+TalentForge is most useful for businesses with recurring customer relationships and usable product/customer data:
+
+- B2B SaaS companies tracking logins, errors, usage drops, renewals, and support issues.
+- Subscription businesses that need early warning before churn or cancellation.
+- Agencies and managed-service teams handling many client accounts and renewal conversations.
+- Marketplaces and platforms with account managers, customer success teams, or vendor success teams.
+- Product-led businesses that can send customer activity or support signals through webhooks.
+
+It is less useful for one-time retail sales, businesses with no customer contact data, or teams that do not have a human available to review customer communication.
+
+## Roles
+
+| Role | What it can do |
+| --- | --- |
+| Company user | Manage its own customers, deals, integrations, agent runs, and campaign drafts. Can request campaign review. |
+| CSM | Review and approve human-review outreach campaigns. |
+| Admin | Has CSM review rights plus the Admin screen for system/company oversight. |
+
+New sign-ups are Company users. Create the initial Admin account with `ADMIN_EMAIL` and `ADMIN_PASSWORD`, then run `python -m talentforge.seed_admin`.
+
+New accounts choose a unique username. They can sign in with either that username or their email. Existing accounts can continue signing in with email; set `ADMIN_USERNAME` and rerun the seed command to give the Admin account a username too.
+
+## Daily Operation
+
+### 1. Add customers
+
+Use **Customers** to add one customer manually, or use **Integrations -> CSV import** to add a list.
+
+The importer accepts these headers (case-insensitive):
+
+```csv
+Company,Email,Phone,MRR,Lifetime Value,Purchase Count,Status,Tags
+Northstar Analytics,northstar@example.com,+15550100,2500,15000,8,healthy,"enterprise,analytics"
 ```
 
-### 1. Telemetry Ingestion Layer (`ingestion.py`)
-*   **Security Signature Gate**: Validates incoming telemetry via HMAC-SHA256 signature calculated against a shared webhook token (`X-TalentForge-Signature`).
-*   **Feedback-Loop Protection**: Calculates a deterministic MD5 hash of `customer_id + error_signature + current_hour_timestamp` (`TelemetryIngestionDeduplication`). Duplicate payloads within the same hour window are instantly rejected (HTTP 409 Conflict) to avoid triggering infinite automated agent runs.
+Use [test_customers.csv](test_customers.csv) for a safe starter import. Its `example.com` email addresses are placeholders, so do not approve delivery to them.
 
-### 2. Semantic Caching Engine (`db/cache_service.py`)
-*   **pgvector Similarity Lookup**: Translates incoming telemetry alert embeddings into a high-speed hybrid RAG lookup.
-*   **Cosine Distance calculations**: Distance is computed as `1.0 - Cosine Similarity`. If an alert matches a previously resolved incident with similarity $\ge 95\%$ (distance $\le 0.05$), the resolved draft payload is reused instantly, bypassing the expensive LLM graph.
-*   **Customer Cooldown Gate**: Checks for any `OutreachCampaign` staged for the customer within the last 24 hours to prevent spamming accounts.
+Use [background_import_customers.csv](background_import_customers.csv) to test a multi-row background import with email, phone, MRR, lifetime value, and purchase-count data.
 
-### 3. LangGraph Multi-Agent Swarm (`graph_engine.py` & `mcp_client.py`)
-*   **State Machine Engine**: Compiles a durable, asynchronous state graph with nodes for caching checks, read-only MCP tool extraction, root-cause reasoning, drafting, and human escalation.
-*   **Three-Retry Ceiling Guard**: Increments retry counts on any Postgres MCP tool discovery, connection, or timeout failure. If `retry_count >= 3`, the engine immediately exits the automated loop and transitions to `escalate_to_human_node` to stage a safe baseline tracking log.
-*   **MCP Read-Only Client**: Wraps Remote MCP Servers through `langchain-mcp-adapters`. It parses remote tools and automatically rejects any mutating tool commands (e.g. `insert`, `update`, `drop`) to protect the database.
+### 2. Review customer health and feedback
 
-### 4. Interactive Command Center (`frontend/`)
-*   **Real-time Timeline Tracking (`AgentMonitor.jsx`)**: Establishes a native WebSocket connection pointing to `/ws/agent/stream/{session_id}`. It renders real-time trace events (node entries, tool calls, retries) as animated, pulsing status dots.
-*   **Human-in-the-Loop approval**: Staged drafts are editable. Reviewers click "Approve & Dispatch Outreach" (which updates the database status and dispatches the email via the Resend API gateway) or "Reject / Redraft".
+On **Customers**:
 
----
+1. Tick one or more customer checkboxes.
+2. Read the **Customer feedback spectrum** cards.
+3. Use **Run analysis** to queue a focused churn-analysis run for only those customers.
+4. Open **Agent Runs** and click the completed run to inspect updated scores, reasons, root causes, or recommended actions.
 
-## 🛠️ Step-by-Step Installation & Setup
+The star rating is a visualization of the saved health score, not a fabricated review score:
 
-### 1. Python Backend Installation
-Create a virtual environment and install the required modules:
+| Health score | Spectrum | Rating |
+| --- | --- | --- |
+| 75-100 | Positive | 4-5 stars |
+| 45-74 | Watch | 3-4 stars |
+| 0-44 | Critical | 1-3 stars |
+
+The cards display real health-history reasons and the latest stored interaction payloads. Those interactions are created from telemetry/webhooks and other connected data; if there are no interactions, TalentForge says so rather than inventing feedback.
+
+Open **Inspect** on a customer to add a CRM note, call summary, customer email, purchase, or support-ticket interaction. It is saved as evidence for later analysis. This lets teams record live customer context even when it did not arrive through an integration.
+
+### 3. Manage deals
+
+Open **Deals** and choose a customer, deal name, and value. Move each deal through:
+
+`New lead -> Contacted -> Qualified -> Proposal -> Closed won / Closed lost`
+
+Deals are scoped to the signed-in company. A user cannot see or edit another company's deals.
+
+### 4. Run AI agents
+
+Open **Agent Runs** to start a general run, or select customers from **Customers** for a focused churn analysis.
+
+Available agents:
+
+- **Churn scorer:** recalculates selected customer health scores and records the reason.
+- **Root cause analyst:** examines scoped CRM history, interaction records, and permitted read-only MCP data for evidence-bound causes and actions.
+- **Outreach drafter:** creates a campaign draft for human review; it does not send email.
+- **Health updater:** recalculates health using recorded CRM activity volume.
+
+### What `queued` means
+
+When you click **Run analysis**, TalentForge immediately saves an `AgentRun` with status `queued` and returns control to the browser. A database-backed dispatcher then claims the job and starts it in the background:
+
+`queued -> running -> complete` or `failed`
+
+The Agent Runs page refreshes every five seconds. Click a run to see its output. A queued job can take longer when the server is busy, the model is processing a large selection, or the read-only MCP service is slow. A failed job stores a safe generic failure message; it does not expose secrets or database credentials.
+
+Queued jobs are recovered after an API restart, so a development reload does not leave them stranded. For production scale, run the API with sufficient worker capacity or move background execution to a dedicated queue worker.
+
+Each job has a configurable 180-second overall timeout (`TALENTFORGE_AGENT_RUN_TIMEOUT_SECONDS`). A slow job keeps running in the background while you navigate; if it exceeds that limit, it becomes `failed` with a safe retry message instead of appearing stuck forever.
+
+### 5. Create and send a campaign
+
+1. Go to **Campaigns**.
+2. Create a campaign draft with a message template and select one or more customers with valid contact emails.
+3. Click **Request review**. The status becomes `pending_review`.
+4. A CSM or Admin signs in, opens Campaigns, then chooses **Approve & dispatch**.
+5. TalentForge sends the approved message through Resend and updates campaign status.
+
+Company users can create and request review, but cannot bypass approval. If a campaign recipient has no contact email, delivery is rejected and the campaign remains available for correction.
+
+For `RESEND_FROM_EMAIL=onboarding@resend.dev`, Resend test-mode delivery is normally limited to the account owner's email. Verify a domain in Resend before sending real customer campaigns.
+
+## Integrations
+
+Integrations do not magically discover or fetch data from every tool. Each option has a specific job.
+
+### CSV import
+
+You upload a customer CSV manually. TalentForge persists it as an import job, then processes rows in the background. You can change tabs or return later; the Integrations page polls and shows queued, running, complete, or failed status with imported/skipped rows.
+
+### Webhook source
+
+Click **Create webhook** to generate a unique secret. Configure your product, website form handler, support system, or billing system to call:
+
+```text
+POST /api/integrations/webhook/{company_id}
+```
+
+Include the `X-TalentForge-Webhook-Signature` header containing the HMAC-SHA256 signature of the raw request body using that generated secret. Supported event types are:
+
+- `user.login`
+- `user.churn_signal`
+- `subscription.cancelled`
+- `support.ticket.opened`
+
+For churn or cancellation events, TalentForge marks the referenced customer as at risk, reduces the health score, and writes health history. This is how external activity becomes visible in the CRM.
+
+### MCP connector
+
+The connector form records an approved MCP connection in the CRM for operational visibility. The live AI graph uses the server configured through `POSTGRES_MCP_*` environment variables. Configure those variables with a separate, read-only database identity; do not provide the main application database password to MCP.
+
+The MCP layer is restricted to approved read-only tools. It must not insert, update, delete, or change database schema.
+
+## Profile and Admin Operations
+
+### Profile settings
+
+Every signed-in user has **Settings** in the sidebar. It can update the workspace name, sign-in email, and password. Changing a password requires the current password and a new password of at least 12 characters.
+
+### Admin command center
+
+Admins have an **Admin** sidebar page. It shows all registered users, company workspaces, customer counts, campaign counts, agent runs, and recorded usage. An Admin can change a user role or suspend a company workspace. Suspension prevents future authenticated access for that company user.
+
+## AI Safety Guards
+
+- Telemetry uses HMAC-SHA256 request signatures.
+- Duplicate telemetry is blocked per customer/error/hour using an idempotency key.
+- Semantic cache can reuse a prior resolution to reduce model calls.
+- Customer outreach has a 24-hour cooldown.
+- MCP tools are read-only and restricted by an allowlist.
+- Tool retries are capped at three; repeated failure escalates to a human fallback instead of looping.
+- Every customer email requires human approval.
+
+## Local Setup
+
+### 1. Install backend dependencies
+
 ```powershell
-# Create virtual environment
 python -m venv venv
-venv\Scripts\Activate.ps1
-
-# Install requirements
-pip install -r requirements.txt
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
-Copy `.env.example` to `.env` and fill in your developer keys:
-```powershell
-copy .env.example .env
-```
-*Make sure to configure:*
-*   `DATABASE_URL`: Neon PostgreSQL connection string.
-*   `JWT_SECRET_KEY`: A secure 32+ character random string.
-*   `TALENTFORGE_WEBHOOK_SECRET`: Secret shared token with telemetry broadcasters.
-*   `OPENAI_API_KEY`: API Key for model invocations.
-*   `RESEND_API_KEY`: Resend Developer API key.
+### 2. Configure `.env`
 
-### 3. Run Database Migrations
-Initialize database schemas and compile the read-only privileges:
+Copy `.env.example` to `.env`, then set at least:
+
+```env
+DATABASE_URL=postgresql+asyncpg://...
+JWT_SECRET_KEY=at-least-32-random-characters
+ADMIN_EMAIL=admin@yourdomain.com
+ADMIN_PASSWORD=a-strong-password-with-at-least-12-characters
+WEBHOOK_SECRET_TOKEN=a-strong-shared-webhook-secret
+OPENAI_API_KEY=...
+RESEND_API_KEY=...
+RESEND_FROM_EMAIL=onboarding@resend.dev
+```
+
+Use a valid email domain for `ADMIN_EMAIL`; values ending in `.local` are rejected by authentication validation.
+
+### 3. Create schema and Admin account
+
 ```powershell
-# Run alembic migrations
 alembic upgrade head
+python -m talentforge.seed_admin
 ```
 
-### 4. Frontend Installation
-Set up the Vite React client:
+### 4. Run locally
+
+Backend, from project root:
+
+```powershell
+uvicorn talentforge.main:app --reload --port 8000
+```
+
+Frontend, in a second terminal:
+
 ```powershell
 cd frontend
-npm install
+npm.cmd install
+npm.cmd run dev
 ```
 
----
+Open `http://localhost:5173`. Use this Vite URL during development, not the backend URL.
 
-## 🚀 Running the Application Local Servers
+## Hackathon Deployment
 
-1.  **Start the Backend API Server**:
-    ```powershell
-    # From the project root
-    uvicorn talentforge.main:app --reload --port 8000
-    ```
-2.  **Start the Frontend Dashboard**:
-    ```powershell
-    # From the frontend directory
-    npm run dev
-    ```
+Use the lowest-cost production split:
 
----
+- **Vercel Hobby:** React frontend from the `frontend` folder.
+- **Render Free:** FastAPI Docker backend using `render.yaml`.
+- **Neon Free:** PostgreSQL with `pgvector`.
+- **Resend:** outbound email after a human approves a campaign.
 
-## 🧪 Testing & Verification Playbook
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full runbook. The important rule is that only public frontend config goes into Vercel. Backend secrets such as `DATABASE_URL`, `OPENAI_API_KEY`, `JWT_SECRET_KEY`, `WEBHOOK_SECRET_TOKEN`, `RESEND_API_KEY`, and `POSTGRES_MCP_AUTH_TOKEN` must be stored only in Render/Railway/GitHub secret settings.
 
-### 1. Running Pytest Suite
-Run the automated unit and integration tests (auth logic, signature validation, hourly deduplication, and LangGraph 3-retry loops):
+Production environment mapping:
+
+| Host | Required config |
+| --- | --- |
+| Vercel frontend | `VITE_API_URL=https://your-backend-host.example.com` |
+| Render/Railway backend | `.env.example` values, entered as platform secrets |
+| Neon database | App `DATABASE_URL` plus separate read-only MCP database user |
+| GitHub Actions | Optional Docker/Render deploy secrets only; tests and Docker build run without production secrets |
+
+The Docker container runs `alembic upgrade head` before starting FastAPI, so database migrations are applied during deployment. The included `.dockerignore` blocks local `.env` files from entering Docker build context.
+
+## Verification
+
 ```powershell
-# Installs testing packages
-pip install pytest pytest-asyncio anyio httpx aiosqlite
-
-# Execute tests
-python -m pytest -v
+.\venv\Scripts\python.exe -m pytest tests
+cd frontend
+npm.cmd run build
 ```
 
-### 2. Testing Telemetry Webhook Ingestion (HMAC-SHA256)
-To verify the telemetry gateway is secure, you can send an HTTP POST event with an HMAC-SHA256 signature.
+## Architecture
 
-Create a test payload `event.json`:
-```json
-{
-  "customer_id": "8a3d537f-3106-4444-9999-555555555555",
-  "event_type": "metrics.exception",
-  "error_signature": "NullPointerException: auth_service.py line 44",
-  "payload": {
-    "module": "auth_service",
-    "traceback": "Unexpected NoneType during user context lookup"
-  }
-}
+```mermaid
+flowchart LR
+    A[CSV or CRM entry] --> C[Customer profiles]
+    B[Signed webhooks] --> C
+    C --> D[Customer spectrum and deals]
+    D --> E[Selected AI run]
+    E --> F[Read-only MCP and LangGraph]
+    F --> G[Saved analysis and campaign draft]
+    G --> H[Human review]
+    H --> I[Resend delivery]
 ```
 
-Calculate the HMAC-SHA256 signature in PowerShell:
-```powershell
-$secret = "replace-with-strong-shared-webhook-secret" # Must match .env TALENTFORGE_WEBHOOK_SECRET
-$body = Get-Content -Raw event.json
-$hmac = New-Object System.Security.Cryptography.HMACSHA256
-$hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($secret)
-$signatureBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($body))
-$signature = [System.BitConverter]::ToString($signatureBytes).Replace("-", "").ToLower()
-Write-Host "X-TalentForge-Signature: sha256=$signature"
-```
+## Main API Areas
 
-Submit via `curl` to the ingestion API:
-```powershell
-curl -X POST http://localhost:8000/api/telemetry/event `
-  -H "Content-Type: application/json" `
-  -H "X-TalentForge-Signature: sha256=<CALCULATED_SIGNATURE_HERE>" `
-  -d @event.json
-```
-
-### 3. Testing WebSocket live monitoring
-1.  Open the frontend dashboard at `http://localhost:5173`.
-2.  Select an active customer card under the review queue.
-3.  Simulate a telemetry exception. Watch the **AgentMonitor** timeline update with real-time logs and animated node entries as the graph runs.
-4.  Once the state completes, inspect the staged email draft in the review panel, edit the text, and click **Approve & Dispatch Outreach** to trigger the Resend email service.
+- `/auth`: sign-up and JWT login.
+- `/api/customers`: customer records, health history, interactions, and risk scoring.
+- `/api/deals`: company-scoped deal pipeline.
+- `/api/agents`: background AI runs and their saved output.
+- `/api/campaigns`: drafts, review requests, approval, and delivery.
+- `/api/integrations`: CSV imports, webhook sources, and MCP registry records.
+- `/api/telemetry/event`: secure platform telemetry ingestion.

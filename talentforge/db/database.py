@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator, Sequence
+
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file so DATABASE_URL and other vars are available
+
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text

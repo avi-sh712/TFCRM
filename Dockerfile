@@ -2,7 +2,7 @@ FROM node:20-alpine AS frontend-build
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
@@ -30,4 +30,4 @@ COPY --from=frontend-build /app/frontend/dist ./talentforge/static/
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn talentforge.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn talentforge.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

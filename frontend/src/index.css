@@ -6,6 +6,7 @@
 
 :root {
   font-family: "Outfit", sans-serif;
+  font-size: 16px;
   color: #e2e8f0;
   background: #020617;
   font-synthesis: none;
@@ -21,6 +22,7 @@ body {
   min-height: 100vh;
   margin: 0;
   background: #020617;
+  font-size: 1rem;
 }
 
 button,
@@ -29,7 +31,7 @@ input {
 }
 
 .glass-card {
-  @apply bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-xl shadow-slate-950/20;
+  @apply min-h-[120px] border border-slate-800/80 bg-slate-900/60 p-6 shadow-xl shadow-slate-950/20 backdrop-blur-md;
 }
 
 .glow-indigo {

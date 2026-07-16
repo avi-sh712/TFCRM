@@ -16,7 +16,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 
-const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_URL || window.location.origin;
 
 function apiUrl(path, apiBaseUrl) {
   return new URL(path, apiBaseUrl || DEFAULT_API_BASE_URL).toString();

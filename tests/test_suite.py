@@ -92,3 +92,16 @@ def test_graph_escalates_at_retry_ceiling_without_another_retry() -> None:
 
     assert route == "escalate"
     assert route != "retry"
+
+
+@pytest.mark.asyncio
+async def test_company_agent_graph_awaits_async_node_factory() -> None:
+    async def node(state: graph_engine.CompanyAgentState) -> dict[str, object]:
+        return {"output": {"company_id": state["company_id"]}}
+
+    graph = graph_engine._compile_company_agent_graph(lambda state: node(state))
+    result = await graph.ainvoke(
+        {"company_id": "customer-1", "config": {}, "output": {}},
+    )
+
+    assert result["output"] == {"company_id": "customer-1"}

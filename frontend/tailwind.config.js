@@ -8,6 +8,10 @@ export default {
         sans: ["Outfit", "sans-serif"],
       },
       colors: {
+        bg: { base: "#0a0b0f", surface: "#111318", card: "#161920", hover: "#1e2028" },
+        border: { DEFAULT: "#2a2d38", subtle: "#1e2028" },
+        text: { primary: "#f0f2f7", secondary: "#8b91a8", muted: "#555b72" },
+        accent: { primary: "#6366f1", hover: "#4f46e5", success: "#22c55e", warning: "#f59e0b", danger: "#ef4444", info: "#3b82f6" },
         background: "#020617",
         card: "#0f172a",
         highlight: {

@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Final
 from uuid import UUID, uuid4
 
-from fastapi import Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, ExpiredSignatureError, jwt
 from passlib.context import CryptContext
 from passlib.exc import UnknownHashError
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -23,6 +27,7 @@ from talentforge.db.models import User, UserRole
 
 
 logger = logging.getLogger("talentforge.security")
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 JWT_SECRET_KEY_ENV: Final = "JWT_SECRET_KEY"
 JWT_ISSUER_ENV: Final = "JWT_ISSUER"
@@ -37,6 +42,7 @@ MAX_ACCESS_TOKEN_EXPIRE_MINUTES: Final = 60
 MIN_JWT_SECRET_BYTES: Final = 32
 MIN_PASSWORD_LENGTH: Final = 12
 MAX_BCRYPT_PASSWORD_BYTES: Final = 72
+USERNAME_PATTERN: Final = re.compile(r"^[a-z0-9_.-]{3,32}$")
 
 password_context = CryptContext(
     schemes=["bcrypt"],
@@ -63,6 +69,43 @@ class AccessTokenClaims:
 
     subject: UUID
     role: UserRole
+    company_id: UUID
+
+
+class SignUpRequest(BaseModel):
+    email: EmailStr
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+    company_name: str | None = Field(default=None, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    identifier: str | None = Field(default=None, min_length=3, max_length=320)
+    email: EmailStr | None = None
+    password: str
+
+
+class ProfileUpdateRequest(BaseModel):
+    email: EmailStr | None = None
+    username: str | None = Field(default=None, min_length=3, max_length=32)
+    company_name: str | None = Field(default=None, max_length=255)
+    current_password: str | None = None
+    new_password: str | None = Field(default=None, min_length=MIN_PASSWORD_LENGTH)
+
+
+class AuthenticatedUserResponse(BaseModel):
+    id: UUID
+    email: str
+    username: str | None
+    role: UserRole
+    company_name: str | None
+    plan: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: AuthenticatedUserResponse
 
 
 def _log_security_event(level: int, event: str, **fields: object) -> None:
@@ -121,6 +164,13 @@ def _validate_password(plain_password: str) -> None:
         )
 
 
+def normalize_username(username: str) -> str:
+    normalized = username.strip().lower()
+    if not USERNAME_PATTERN.fullmatch(normalized):
+        raise ValueError("Username must be 3-32 characters using letters, numbers, dots, hyphens, or underscores.")
+    return normalized
+
+
 def hash_password(plain_password: str) -> str:
     """Hash a new password with bcrypt at the configured work factor."""
     _validate_password(plain_password)
@@ -138,12 +188,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 async def authenticate_user(
     session: AsyncSession,
-    email: str,
+    identifier: str,
     password: str,
 ) -> User | None:
     """Authenticate a user while minimizing account-enumeration timing signals."""
-    normalized_email = email.strip().lower()
-    result = await session.execute(select(User).where(User.email == normalized_email))
+    normalized_identifier = identifier.strip().lower()
+    result = await session.execute(
+        select(User).where(or_(User.email == normalized_identifier, User.username == normalized_identifier))
+    )
     user = result.scalar_one_or_none()
 
     if user is None:
@@ -195,6 +247,7 @@ def create_access_token(user: User) -> str:
         {
             "sub": str(user.id),
             "role": role.value,
+            "company_id": str(user.id),
             "scope": f"role:{role.value}",
             "type": "access",
             "iss": settings.issuer,
@@ -248,6 +301,7 @@ def _decode_access_token(token: str) -> AccessTokenClaims:
     try:
         subject = UUID(str(claims["sub"]))
         role = _role_from_value(claims.get("role"), source="access_token")
+        company_id = UUID(str(claims.get("company_id", subject)))
     except (KeyError, ValueError, TypeError):
         _log_security_event(logging.WARNING, "invalid_access_token_identity")
         raise _credentials_exception()
@@ -258,7 +312,7 @@ def _decode_access_token(token: str) -> AccessTokenClaims:
         _log_security_event(logging.WARNING, "invalid_token_scope")
         raise _credentials_exception()
 
-    return AccessTokenClaims(subject=subject, role=role)
+    return AccessTokenClaims(subject=subject, role=role, company_id=company_id)
 
 
 async def _resolve_authenticated_user(
@@ -274,6 +328,14 @@ async def _resolve_authenticated_user(
 
     if user.role != token_claims.role:
         _log_security_event(logging.WARNING, "token_role_mismatch")
+        raise _credentials_exception()
+
+    if user.suspended:
+        _log_security_event(logging.WARNING, "suspended_user_access_denied")
+        raise _credentials_exception()
+
+    if user.id != token_claims.company_id:
+        _log_security_event(logging.WARNING, "token_company_mismatch")
         raise _credentials_exception()
 
     if allowed_roles and user.role not in allowed_roles:
@@ -327,3 +389,102 @@ def get_current_active_user(
         )
 
     return current_active_user_dependency
+
+
+def get_current_user() -> Callable[..., Awaitable[User]]:
+    """FastAPI dependency for the currently authenticated company user."""
+    return get_current_active_user()
+
+
+def require_admin() -> Callable[..., Awaitable[User]]:
+    """FastAPI dependency for administrative CRM operations."""
+    return get_current_active_user([UserRole.ADMIN.value])
+
+
+def _token_response(user: User) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(user),
+        user=AuthenticatedUserResponse(
+            id=user.id,
+            email=user.email,
+            username=user.username,
+            role=user.role,
+            company_name=user.company_name,
+            plan=user.plan,
+        ),
+    )
+
+
+@router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def signup(
+    payload: SignUpRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> TokenResponse:
+    try:
+        username = normalize_username(payload.username)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    user = User(
+        email=payload.email.lower(),
+        username=username,
+        hashed_password=hash_password(payload.password),
+        role=UserRole.COMPANY,
+        company_name=payload.company_name,
+    )
+    session.add(user)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account already exists for this email or username.",
+        ) from None
+    await session.refresh(user)
+    return _token_response(user)
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(
+    payload: LoginRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> TokenResponse:
+    identifier = payload.identifier or (str(payload.email) if payload.email is not None else "")
+    user = await authenticate_user(session, identifier, payload.password)
+    if user is None or user.suspended:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return _token_response(user)
+
+
+@router.patch("/profile", response_model=TokenResponse)
+async def update_profile(
+    payload: ProfileUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[User, Depends(get_current_user())],
+) -> TokenResponse:
+    changing_password = payload.new_password is not None
+    if changing_password:
+        if not payload.current_password or not verify_password(payload.current_password, current_user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect.")
+        current_user.hashed_password = hash_password(payload.new_password)
+
+    if payload.email is not None:
+        current_user.email = payload.email.lower()
+    if payload.username is not None:
+        try:
+            current_user.username = normalize_username(payload.username)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    if payload.company_name is not None:
+        current_user.company_name = payload.company_name or None
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account already exists for this email or username.") from None
+    await session.refresh(current_user)
+    return _token_response(current_user)

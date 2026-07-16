@@ -1,0 +1,6 @@
+Company,Email,MRR,Status,Tags
+Northstar Analytics,northstar@example.com,2500,healthy,"enterprise,analytics"
+BrightDesk Studio,brightdesk@example.com,850,at_risk,"startup,low-engagement"
+Vertex Commerce,vertex@example.com,4200,healthy,"retail,priority"
+Harbor Health,harbor@example.com,1800,disengaged,"healthcare,renewal"
+Oak & Stone,oakstone@example.com,600,healthy,"small-business,onboarding"

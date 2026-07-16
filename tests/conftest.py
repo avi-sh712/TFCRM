@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from types import SimpleNamespace
 
 import pytest
+
+
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+asyncpg://talentforge_test:talentforge_test@localhost:5432/talentforge_test",
+)
+os.environ.setdefault("JWT_SECRET_KEY", "t" * 48)
+os.environ.setdefault("WEBHOOK_SECRET_TOKEN", "w" * 48)
 
 
 class FakeChatOpenAI:

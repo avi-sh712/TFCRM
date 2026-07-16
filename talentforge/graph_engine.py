@@ -10,19 +10,30 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from uuid import UUID
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from talentforge.db.cache_service import check_semantic_cache
-from talentforge.db.models import AgentAuditLog, CampaignStatus, OutreachCampaign
+from talentforge.db.models import (
+    Campaign,
+    CustomerHealthHistory,
+    AgentAuditLog,
+    CampaignStatus,
+    CustomerProfile,
+    InteractionHistory,
+    OutreachCampaign,
+)
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -36,6 +47,9 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 15.0
 DEFAULT_MODEL_TIMEOUT_SECONDS = 45.0
 DEFAULT_MAX_TOOL_CALLS = 3
 DEFAULT_MAX_TOOL_RESULT_CHARS = 16_000
+CHECKPOINTER_MODE_ENV = "TALENTFORGE_CHECKPOINTER_MODE"
+
+logger = logging.getLogger("talentforge.graph_engine")
 
 
 class TalentForgeGraphState(TypedDict):
@@ -49,6 +63,42 @@ class TalentForgeGraphState(TypedDict):
     semantic_cache_hit: bool
     analysis_output: str
     final_draft: str
+
+
+class CompanyAgentState(TypedDict):
+    company_id: str
+    config: dict[str, Any]
+    output: dict[str, Any]
+
+
+class RiskAssessment(BaseModel):
+    risk_level: str
+    drivers: list[str] = Field(default_factory=list)
+    recommended_action: str
+
+
+class CustomerRiskScore(BaseModel):
+    customer_id: UUID
+    health_score: float = Field(ge=0, le=100)
+    reason: str
+
+
+class ChurnRiskScoringResult(BaseModel):
+    scores: list[CustomerRiskScore] = Field(default_factory=list)
+
+
+class RootCauseReport(BaseModel):
+    top_causes: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    urgency: str
+    evidence: list[str] = Field(default_factory=list)
+
+
+class OutreachDraftResult(BaseModel):
+    campaign_name: str
+    subject: str
+    message_template: str
+    target_customer_ids: list[UUID] = Field(default_factory=list)
 
 
 class GraphEngineConfigurationError(RuntimeError):
@@ -202,6 +252,15 @@ class TalentForgeGraphEngine:
                 if embedding is not None:
                     cached_draft = await check_semantic_cache(session, embedding)
                     if cached_draft is not None:
+                        session.add(
+                            AgentAuditLog(
+                                session_id=state["customer_id"],
+                                node_name="check_cache_node",
+                                action_taken="semantic_cache_hit",
+                                metadata_json={"customer_id": state["customer_id"]},
+                            )
+                        )
+                        await session.flush()
                         return {
                             "max_retries": retry_limit,
                             "semantic_cache_hit": True,
@@ -485,11 +544,41 @@ def checkpoint_database_url(database_url: str | None = None) -> str:
     )
 
 
+def _effective_checkpointer_mode() -> Literal["memory", "postgres"]:
+    """Use a local-only saver when Windows runs Psycopg on a Proactor loop."""
+    configured = os.getenv(CHECKPOINTER_MODE_ENV, "auto").strip().lower()
+    if configured == "memory":
+        return "memory"
+    if configured == "postgres":
+        return "postgres"
+    if configured != "auto":
+        raise GraphEngineConfigurationError(
+            f"{CHECKPOINTER_MODE_ENV} must be auto, memory, or postgres."
+        )
+
+    loop_name = type(asyncio.get_running_loop()).__name__.lower()
+    return "memory" if os.name == "nt" and "proactor" in loop_name else "postgres"
+
+
 @asynccontextmanager
 async def postgres_checkpointer(
     database_url: str | None = None,
 ) -> AsyncIterator[Any]:
     """Keep a PostgreSQL LangGraph checkpointer alive for a graph's lifetime."""
+    if _effective_checkpointer_mode() == "memory":
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+        except ImportError:
+            raise GraphEngineDependencyError(
+                "langgraph checkpoint memory support is required for local Windows runs."
+            ) from None
+        logger.warning(
+            "Using an in-memory LangGraph checkpointer because Psycopg async is "
+            "incompatible with the active Windows Proactor event loop."
+        )
+        yield MemorySaver()
+        return
+
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     except ImportError:
@@ -519,9 +608,11 @@ def _tool_routing_messages(state: TalentForgeGraphState) -> list[tuple[str, str]
     return [
         (
             "system",
-            "Select only the minimum read-only customer tracking tool calls needed "
-            "to investigate this churn alert. Use the supplied customer_id exactly. "
-            "Do not invent customer facts and do not request write operations.",
+            "You are the Data Routing Agent. Decide which read-only MCP database "
+            "tools to call for this customer churn alert, selecting the minimum "
+            "effective set to reduce latency and cost. Use the supplied customer_id "
+            "exactly as provided. Never hallucinate customer data and never request "
+            "write or mutating operations.",
         ),
         (
             "human",
@@ -535,10 +626,14 @@ def _root_cause_messages(state: TalentForgeGraphState) -> list[tuple[str, str]]:
     return [
         (
             "system",
-            "You are TalentForge's root-cause analyst. Infer likely churn drivers "
-            "only from the supplied alert and historical records. Separate evidence "
-            "from hypotheses, identify urgency and recommended next actions, and do "
-            "not claim certainty where the records are incomplete.",
+            "You are the Root-Cause Intelligence Agent. Perform rigorous diagnostic "
+            "analysis over the supplied telemetry alert and MCP-retrieved CRM history. "
+            "Return a structured report with verified evidence sourced only from the "
+            "records, clearly labeled inferred hypotheses, urgency level "
+            "(Critical/High/Medium/Low), risk category (Churn/Disengagement/"
+            "Technical/Billing/Relationship), and recommended next actions. Think "
+            "step by step internally, but do not expose chain-of-thought. Do not claim "
+            "certainty when retrieved telemetry is incomplete.",
         ),
         (
             "human",
@@ -553,11 +648,13 @@ def _outreach_drafting_messages(state: TalentForgeGraphState) -> list[tuple[str,
     return [
         (
             "system",
-            "You are a senior customer-success manager. Draft a concise, empathetic "
-            "outreach email based strictly on the evidence. Acknowledge the customer's "
-            "experience without admitting unsupported fault, avoid promises, propose a "
-            "specific next step, and include a clear subject line. This is a draft for "
-            "human approval, not a message to send.",
+            "You are the Customer Success Outreach Agent. Draft a premium, proactive, "
+            "professional outreach email using the analysis_output and alert_context "
+            "to personalize the message. Acknowledge the customer's friction without "
+            "legal admissions of fault. Include a relevant subject line, warm opening "
+            "addressing the issue, product value alignment, and one low-friction CTA. "
+            "Do not add unsupported promises, compensation, or deadlines. Mark this "
+            "as a draft for human review, never a message sent directly.",
         ),
         (
             "human",
@@ -572,12 +669,305 @@ def _formatting_messages(frontier_draft: str) -> list[tuple[str, str]]:
     return [
         (
             "system",
-            "Format this approved-content candidate into a concise professional email. "
-            "Preserve its facts and uncertainty. Do not add claims, offers, dates, or "
-            "commitments. Return only the subject line and email body.",
+            "You are the Polish & Formatting Agent. Format the frontier-drafted email "
+            "candidate into a clean, production-ready email string. Preserve every "
+            "fact, nuance, context, and strategic intent. Do not add or remove claims, "
+            "offers, commitments, dates, or context. Return exactly: "
+            "Subject: <subject line>\n\n<email body>",
         ),
         ("human", frontier_draft),
     ]
+
+
+async def score_customer_risk(customer_id: UUID | str, session: Any) -> dict[str, Any]:
+    """Use Luna to produce an evidence-bound JSON customer risk assessment."""
+    customer_uuid = UUID(str(customer_id))
+    customer = await session.get(CustomerProfile, customer_uuid)
+    result = await session.execute(
+        select(InteractionHistory)
+        .where(InteractionHistory.customer_id == customer_uuid)
+        .order_by(InteractionHistory.timestamp.desc())
+        .limit(50)
+    )
+    interactions = list(result.scalars().all())
+
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError:
+        raise GraphEngineDependencyError(
+            "langchain-openai is required to score customer risk."
+        ) from None
+
+    model = ChatOpenAI(
+        model=_environment_value("TALENTFORGE_ROUTING_MODEL", DEFAULT_FAST_MODEL),
+        max_retries=0,
+    )
+    scorer = model.with_structured_output(RiskAssessment)
+    response = await scorer.ainvoke(
+        [
+            (
+                "system",
+                "You are TalentForge's Proactive Risk Scoring Agent running on "
+                "GPT-5.6 Luna. Base the assessment only on "
+                "the supplied customer profile and interaction history. Do not "
+                "invent facts.",
+            ),
+            (
+                "human",
+                _bounded_json(
+                    {
+                        "customer_id": str(customer_uuid),
+                        "customer": customer.model_dump() if customer else None,
+                        "interactions": [
+                            interaction.model_dump() for interaction in interactions
+                        ],
+                    },
+                    DEFAULT_MAX_TOOL_RESULT_CHARS,
+                ),
+            ),
+        ]
+    )
+
+    return response.model_dump()
+
+
+def _company_agent_model() -> Any:
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError:
+        raise GraphEngineDependencyError(
+            "langchain-openai is required to run TalentForge company agents."
+        ) from None
+    return ChatOpenAI(
+        model=_environment_value("TALENTFORGE_ROUTING_MODEL", DEFAULT_FAST_MODEL),
+        max_retries=0,
+    )
+
+
+async def _company_customers(
+    session: Any,
+    company_id: UUID,
+    config: dict[str, Any],
+) -> list[CustomerProfile]:
+    statement = select(CustomerProfile).where(CustomerProfile.company_id == company_id)
+    raw_ids = config.get("customer_ids", [])
+    if raw_ids:
+        customer_ids = [UUID(str(customer_id)) for customer_id in raw_ids]
+        statement = statement.where(CustomerProfile.id.in_(customer_ids))
+    limit = min(max(int(config.get("limit", 25)), 1), 50)
+    result = await session.execute(statement.order_by(CustomerProfile.updated_at.desc()).limit(limit))
+    return list(result.scalars().all())
+
+
+async def _churn_risk_node(
+    state: CompanyAgentState,
+    session: Any,
+) -> dict[str, Any]:
+    company_id = UUID(state["company_id"])
+    customers = await _company_customers(session, company_id, state["config"])
+    model = _company_agent_model().with_structured_output(ChurnRiskScoringResult)
+    response = await model.ainvoke(
+        [
+            (
+                "system",
+                "You are the Churn Risk Scorer. Return scores only for supplied "
+                "customers, using evidence in their profiles. Keep scores from 0 to 100.",
+            ),
+            ("human", _bounded_json([customer.model_dump() for customer in customers], 24_000)),
+        ]
+    )
+    customer_by_id = {customer.id: customer for customer in customers}
+    updated = []
+    for score in response.scores:
+        customer = customer_by_id.get(score.customer_id)
+        if customer is None:
+            continue
+        customer.health_score = score.health_score
+        session.add(CustomerHealthHistory(
+            customer_id=customer.id,
+            health_score=score.health_score,
+            reason=score.reason,
+        ))
+        updated.append(score.model_dump(mode="json"))
+    await session.flush()
+    return {"output": {"updated_customers": updated}}
+
+
+async def _root_cause_node(
+    state: CompanyAgentState,
+    session: Any,
+) -> dict[str, Any]:
+    company_id = UUID(state["company_id"])
+    customers = await _company_customers(session, company_id, state["config"])
+    customer_ids = [customer.id for customer in customers]
+    interactions = []
+    embeddings = []
+    mcp_results: list[dict[str, Any]] = []
+    if customer_ids:
+        interaction_result = await session.execute(
+            select(InteractionHistory)
+            .where(InteractionHistory.customer_id.in_(customer_ids))
+            .order_by(InteractionHistory.timestamp.desc())
+            .limit(100)
+        )
+        interactions = [item.model_dump() for item in interaction_result.scalars().all()]
+        from talentforge.db.models import CustomerEmbedding
+
+        embedding_result = await session.execute(
+            select(CustomerEmbedding.content)
+            .where(CustomerEmbedding.customer_id.in_(customer_ids))
+            .limit(20)
+        )
+        embeddings = [content for content in embedding_result.scalars().all()]
+    if state["config"].get("use_mcp", True) and customer_ids:
+        try:
+            from talentforge.mcp_client import postgres_mcp_tool_session
+
+            async with postgres_mcp_tool_session() as tools:
+                router = _company_agent_model().bind_tools(tools)
+                tool_response = await router.ainvoke(
+                    [
+                        ("system", "Select the minimum read-only tools needed for these customer IDs."),
+                        ("human", _bounded_json({"customer_ids": [str(customer_id) for customer_id in customer_ids]}, 4_000)),
+                    ]
+                )
+                tool_by_name = {tool.name: tool for tool in tools}
+                for call in list(getattr(tool_response, "tool_calls", []) or [])[:2]:
+                    tool = tool_by_name.get(str(call.get("name", "")))
+                    if tool is not None:
+                        mcp_results.append({"tool": tool.name, "result": await tool.ainvoke(call.get("args", {}))})
+        except Exception:
+            mcp_results = []
+
+    model = _company_agent_model().with_structured_output(RootCauseReport)
+    response = await model.ainvoke(
+        [
+            (
+                "system",
+                "You are the Root Cause Analyst. Produce evidence-bound causes and "
+                "actions using only supplied CRM history and semantic context.",
+            ),
+            (
+                "human",
+                _bounded_json(
+                    {"customers": [customer.model_dump() for customer in customers], "interactions": interactions, "semantic_context": embeddings, "mcp_history": mcp_results},
+                    32_000,
+                ),
+            ),
+        ]
+    )
+    return {"output": response.model_dump()}
+
+
+async def _outreach_draft_node(
+    state: CompanyAgentState,
+    session: Any,
+) -> dict[str, Any]:
+    company_id = UUID(state["company_id"])
+    customers = await _company_customers(session, company_id, state["config"])
+    goal = str(state["config"].get("goal", "re-engage"))
+    model = _company_agent_model().with_structured_output(OutreachDraftResult)
+    response = await model.ainvoke(
+        [
+            (
+                "system",
+                "You are the Outreach Drafter. Create a human-review campaign draft. "
+                "Never promise compensation, dates, or automatic sending.",
+            ),
+            ("human", _bounded_json({"goal": goal, "customers": [customer.model_dump() for customer in customers]}, 24_000)),
+        ]
+    )
+    campaign = Campaign(
+        company_id=company_id,
+        name=response.campaign_name,
+        status="pending_review",
+        target_segment={"customer_ids": [str(customer_id) for customer_id in response.target_customer_ids]},
+        message_template=f"Subject: {response.subject}\n\n{response.message_template}",
+    )
+    session.add(campaign)
+    await session.flush()
+    return {"output": {"campaign_id": str(campaign.id), **response.model_dump(mode="json")}}
+
+
+async def _health_score_update_node(
+    state: CompanyAgentState,
+    session: Any,
+) -> dict[str, Any]:
+    company_id = UUID(state["company_id"])
+    customers = await _company_customers(session, company_id, state["config"])
+    updates = []
+    for customer in customers:
+        interaction_result = await session.execute(
+            select(func.count(InteractionHistory.id)).where(InteractionHistory.customer_id == customer.id)
+        )
+        interaction_count = int(interaction_result.scalar_one())
+        score = min(100.0, max(0.0, 50.0 + min(interaction_count, 20) * 2.5))
+        customer.health_score = score
+        session.add(CustomerHealthHistory(
+            customer_id=customer.id,
+            health_score=score,
+            reason="Health score recalculated from CRM activity volume.",
+        ))
+        updates.append({"customer_id": str(customer.id), "health_score": score})
+    await session.flush()
+    return {"output": {"updated_customers": updates}}
+
+
+def _compile_company_agent_graph(node: Any, checkpointer: Any | None = None) -> Any:
+    try:
+        from langgraph.graph import END, START, StateGraph
+    except ImportError:
+        raise GraphEngineDependencyError("langgraph is required to run company agents.") from None
+
+    async def execute(state: CompanyAgentState) -> dict[str, Any]:
+        """Await graph-node factories passed as concise state lambdas."""
+        return await node(state)
+
+    workflow = StateGraph(CompanyAgentState)
+    workflow.add_node("execute", execute)
+    workflow.add_edge(START, "execute")
+    workflow.add_edge("execute", END)
+    return workflow.compile(checkpointer=checkpointer)
+
+
+def build_churn_risk_scorer_graph(session: Any, checkpointer: Any | None = None) -> Any:
+    return _compile_company_agent_graph(lambda state: _churn_risk_node(state, session), checkpointer)
+
+
+def build_root_cause_analyst_graph(session: Any, checkpointer: Any | None = None) -> Any:
+    return _compile_company_agent_graph(lambda state: _root_cause_node(state, session), checkpointer)
+
+
+def build_outreach_drafter_graph(session: Any, checkpointer: Any | None = None) -> Any:
+    return _compile_company_agent_graph(lambda state: _outreach_draft_node(state, session), checkpointer)
+
+
+def build_health_score_updater_graph(session: Any, checkpointer: Any | None = None) -> Any:
+    return _compile_company_agent_graph(lambda state: _health_score_update_node(state, session), checkpointer)
+
+
+async def run_company_agent(
+    agent_type: str,
+    company_id: UUID,
+    config: dict[str, Any],
+    session: Any,
+    checkpointer: Any | None = None,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    graphs = {
+        "churn_analysis": build_churn_risk_scorer_graph(session, checkpointer),
+        "root_cause": build_root_cause_analyst_graph(session, checkpointer),
+        "outreach_draft": build_outreach_drafter_graph(session, checkpointer),
+        "health_scoring": build_health_score_updater_graph(session, checkpointer),
+    }
+    graph = graphs.get(agent_type)
+    if graph is None:
+        raise ValueError("Unsupported agent type.")
+    result = await graph.ainvoke(
+        {"company_id": str(company_id), "config": config, "output": {}},
+        config={"configurable": {"thread_id": thread_id or str(company_id)}},
+    )
+    return dict(result["output"])
 
 
 def _alert_embedding(alert_context: dict[str, Any]) -> list[float] | None:

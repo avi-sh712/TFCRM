@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import logging
 import os
+import csv
+from io import StringIO
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -118,6 +120,72 @@ class AgentStreamManager:
 
 
 agent_stream_manager = AgentStreamManager()
+
+
+CUSTOMER_IMPORT_HEADERS = {
+    "name": {"name", "customer name", "company", "company name", "account"},
+    "email": {"email", "email address", "contact email"},
+    "phone": {"phone", "phone number", "mobile", "contact phone"},
+    "mrr": {"mrr", "arr", "monthly recurring revenue", "revenue"},
+    "status": {"status", "health", "customer status"},
+    "tags": {"tags", "tag", "segments", "segment"},
+    "lifetime_value": {"lifetime value", "ltv", "total spend", "total purchases"},
+    "purchase_count": {"purchase count", "purchases", "orders", "order count"},
+}
+
+
+def parse_customer_csv(content: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Normalize common customer CSV headers without touching persistence."""
+    reader = csv.DictReader(StringIO(content))
+    if not reader.fieldnames:
+        return [], [{"reason": "CSV is missing a header row."}]
+
+    header_map: dict[str, str] = {}
+    for raw_header in reader.fieldnames:
+        normalized = raw_header.strip().lower()
+        for field, aliases in CUSTOMER_IMPORT_HEADERS.items():
+            if normalized in aliases:
+                header_map[field] = raw_header
+                break
+
+    if "name" not in header_map:
+        return [], [{"reason": "CSV needs a customer name or company column."}]
+
+    records: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for row_number, row in enumerate(reader, start=2):
+        name = (row.get(header_map["name"]) or "").strip()
+        if not name:
+            skipped.append({"row": str(row_number), "reason": "Customer name is empty."})
+            continue
+        raw_mrr = (row.get(header_map.get("mrr", "")) or "").strip()
+        try:
+            mrr = float(raw_mrr.replace(",", "")) if raw_mrr else 0.0
+        except ValueError:
+            skipped.append({"row": str(row_number), "reason": "MRR is not numeric."})
+            continue
+        raw_tags = (row.get(header_map.get("tags", "")) or "").strip()
+        raw_lifetime_value = (row.get(header_map.get("lifetime_value", "")) or "").strip()
+        raw_purchase_count = (row.get(header_map.get("purchase_count", "")) or "").strip()
+        try:
+            lifetime_value = float(raw_lifetime_value.replace(",", "")) if raw_lifetime_value else 0.0
+            purchase_count = int(raw_purchase_count) if raw_purchase_count else 0
+        except ValueError:
+            skipped.append({"row": str(row_number), "reason": "Purchase data is not numeric."})
+            continue
+        records.append(
+            {
+                "name": name,
+                "email": (row.get(header_map.get("email", "")) or "").strip() or None,
+                "phone": (row.get(header_map.get("phone", "")) or "").strip() or None,
+                "mrr": max(mrr, 0.0),
+                "status": (row.get(header_map.get("status", "")) or "healthy").strip().lower(),
+                "tags": [tag.strip() for tag in raw_tags.split(",") if tag.strip()] or None,
+                "lifetime_value": max(lifetime_value, 0.0),
+                "purchase_count": max(purchase_count, 0),
+            }
+        )
+    return records, skipped
 
 
 def _log_ingestion_security_event(event: str, **fields: object) -> None:
