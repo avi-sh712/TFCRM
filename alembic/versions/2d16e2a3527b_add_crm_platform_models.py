@@ -27,26 +27,84 @@ def upgrade() -> None:
         sqlmodel.SQLModel.metadata.create_all(connection, checkfirst=True)
         return
 
-    op.add_column('customer_profiles', sa.Column('company_id', sa.UUID(), nullable=True))
-    op.add_column('customer_profiles', sa.Column('contact_email', sqlmodel.sql.sqltypes.AutoString(length=320), nullable=True))
-    op.add_column('customer_profiles', sa.Column('status', sa.String(length=32), server_default='healthy', nullable=False))
-    op.add_column('customer_profiles', sa.Column('mrr', sa.Float(), server_default='0', nullable=False))
-    op.add_column('customer_profiles', sa.Column('last_contact', sa.DateTime(timezone=True), nullable=True))
-    op.add_column('customer_profiles', sa.Column('tags', sa.ARRAY(sa.String()), nullable=True))
-    op.add_column('customer_profiles', sa.Column('notes', sa.Text(), nullable=True))
-    op.add_column('customer_profiles', sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False))
-    op.create_index('ix_customer_profiles_company_id', 'customer_profiles', ['company_id'], unique=False)
-    op.create_index('ix_customer_profiles_company_status', 'customer_profiles', ['company_id', 'status'], unique=False)
-    op.create_foreign_key('fk_customer_profiles_company_id_users', 'customer_profiles', 'users', ['company_id'], ['id'], ondelete='SET NULL')
-    op.add_column('users', sa.Column('company_name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True))
-    op.add_column('users', sa.Column('plan', sa.String(length=50), server_default='free', nullable=False))
-    op.add_column('users', sa.Column('suspended', sa.Boolean(), server_default='false', nullable=False))
-    op.alter_column('users', 'role',
-               existing_type=sa.VARCHAR(length=6),
-               type_=sa.Enum('admin', 'company', 'csm', 'viewer', name='user_role', native_enum=False),
-               existing_nullable=False,
-               existing_server_default=sa.text("'viewer'::character varying"),
-               server_default=sa.text("'company'::character varying"))
+    profile_columns = {
+        column['name'] for column in inspector.get_columns('customer_profiles')
+    }
+    profile_additions = (
+        ('company_id', sa.UUID(), True, None),
+        ('contact_email', sqlmodel.sql.sqltypes.AutoString(length=320), True, None),
+        ('status', sa.String(length=32), False, 'healthy'),
+        ('mrr', sa.Float(), False, '0'),
+        ('last_contact', sa.DateTime(timezone=True), True, None),
+        ('tags', sa.ARRAY(sa.String()), True, None),
+        ('notes', sa.Text(), True, None),
+        ('created_at', sa.DateTime(timezone=True), False, sa.text('now()')),
+    )
+    for name, column_type, nullable, default in profile_additions:
+        if name not in profile_columns:
+            op.add_column(
+                'customer_profiles',
+                sa.Column(name, column_type, nullable=nullable, server_default=default),
+            )
+
+    index_names = {
+        index['name'] for index in inspector.get_indexes('customer_profiles')
+    }
+    if 'ix_customer_profiles_company_id' not in index_names:
+        op.create_index(
+            'ix_customer_profiles_company_id',
+            'customer_profiles',
+            ['company_id'],
+            unique=False,
+        )
+    if 'ix_customer_profiles_company_status' not in index_names:
+        op.create_index(
+            'ix_customer_profiles_company_status',
+            'customer_profiles',
+            ['company_id', 'status'],
+            unique=False,
+        )
+
+    company_fk_exists = any(
+        foreign_key['constrained_columns'] == ['company_id']
+        and foreign_key['referred_table'] == 'users'
+        for foreign_key in inspector.get_foreign_keys('customer_profiles')
+    )
+    if not company_fk_exists:
+        op.create_foreign_key(
+            'fk_customer_profiles_company_id_users',
+            'customer_profiles',
+            'users',
+            ['company_id'],
+            ['id'],
+            ondelete='SET NULL',
+        )
+
+    user_columns = {column['name'] for column in inspector.get_columns('users')}
+    user_additions = (
+        ('company_name', sqlmodel.sql.sqltypes.AutoString(length=255), True, None),
+        ('plan', sa.String(length=50), False, 'free'),
+        ('suspended', sa.Boolean(), False, 'false'),
+    )
+    has_legacy_user_schema = any(name not in user_columns for name, *_ in user_additions)
+    for name, column_type, nullable, default in user_additions:
+        if name not in user_columns:
+            op.add_column(
+                'users',
+                sa.Column(name, column_type, nullable=nullable, server_default=default),
+            )
+    if has_legacy_user_schema:
+        op.alter_column(
+            'users',
+            'role',
+            existing_type=sa.VARCHAR(length=6),
+            type_=sa.Enum(
+                'admin', 'company', 'csm', 'viewer', name='user_role', native_enum=False
+            ),
+            existing_nullable=False,
+            existing_server_default=sa.text("'viewer'::character varying"),
+            server_default=sa.text("'company'::character varying"),
+        )
 
 
 def downgrade() -> None:
