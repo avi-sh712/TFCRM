@@ -1,8 +1,9 @@
-import { ArrowRight, Check, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, Check, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import ThemeToggle from "../components/ThemeToggle";
 import { useAuth } from "../lib/auth-context";
+import brandLogo from "../assets/tfcrm-logo.png";
 
 const highlights = [
   "Bring contacts, deals, and customer history together.",
@@ -53,8 +54,8 @@ export default function Login() {
       <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-7xl flex-col justify-between md:min-h-[calc(100vh-4rem)]">
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-lg bg-accent-primary text-white shadow-glow-indigo"><Sparkles size={20} /></span>
-            <div><b className="text-lg">TalentForge</b><p className="text-sm text-text-secondary">Customer success CRM</p></div>
+            <img src={brandLogo} alt="TFCRM" className="h-11 w-11 rounded-lg border border-white/20 object-cover shadow-glow-indigo" />
+            <div><b className="text-lg">TFCRM</b><p className="text-sm text-text-secondary">Customer success CRM</p></div>
           </div>
           <ThemeToggle />
         </header>

@@ -57,14 +57,14 @@ export default function Integrations() {
       const form = new FormData(); form.append("file", file);
       const result = await api("/api/integrations/csv-upload", { method: "POST", body: form });
       setNotice(`Import ${String(result.id).slice(0, 8)} is queued and continues in the background.`);
-      setFile(null); event.currentTarget.reset(); await load();
+      setFile(null); event.currentTarget.reset(); await load(); setError("");
     } catch (cause) { setError(cause.message); } finally { setUploading(false); }
   }
 
   async function cancelImport(jobId) {
     if (cancellingId) return;
     setCancellingId(jobId); setError("");
-    try { await api(`/api/integrations/csv-jobs/${jobId}/cancel`, { method: "POST" }); setNotice("Import cancelled."); await load(); } catch (cause) { setError(cause.message); } finally { setCancellingId(""); }
+    try { await api(`/api/integrations/csv-jobs/${jobId}/cancel`, { method: "POST" }); setNotice("Import cancelled."); await load(); setError(""); } catch (cause) { setError(cause.message); } finally { setCancellingId(""); }
   }
 
   async function registerConnector(event) {
@@ -76,13 +76,13 @@ export default function Integrations() {
 
   async function createConnection(path, setBusy, message) {
     setBusy(true); setError(""); setNotice("");
-    try { const created = await api(path, { method: "POST" }); setConnection(created); setNotice(message); await load(); } catch (cause) { setError(cause.message); } finally { setBusy(false); }
+    try { const created = await api(path, { method: "POST" }); setConnection(created); setNotice(message); await load(); setError(""); } catch (cause) { setError(cause.message); } finally { setBusy(false); }
   }
 
   async function deleteSource(sourceId) {
     if (deletingId || !window.confirm("Delete this integration? New events from it will be rejected.")) return;
     setDeletingId(sourceId); setError("");
-    try { await api(`/api/integrations/${sourceId}`, { method: "DELETE" }); if (connection?.id === sourceId) setConnection(null); setNotice("Integration deleted."); await load(); } catch (cause) { setError(cause.message); } finally { setDeletingId(""); }
+    try { await api(`/api/integrations/${sourceId}`, { method: "DELETE" }); if (connection?.id === sourceId) setConnection(null); setNotice("Integration deleted."); await load(); setError(""); } catch (cause) { setError(cause.message); } finally { setDeletingId(""); }
   }
 
   return <>

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  Activity,
   Bot,
   Database,
   LayoutDashboard,
@@ -11,7 +10,8 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { NavLink } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
+import brandLogo from "../assets/tfcrm-logo.png";
 import { useAuth } from "../lib/auth-context";
 import { api } from "../lib/api";
 import ThemeToggle from "./ThemeToggle";
@@ -47,6 +47,7 @@ function Navigation({ items, activeRuns, compact = false }) {
 export default function Shell({ children }) {
   const { user, logout } = useAuth();
   const [activeRuns, setActiveRuns] = useState(0);
+  const [profileOpen, setProfileOpen] = useState(false);
   const items = user?.role === "admin" ? [...links, ["/admin", "Admin", Settings]] : links;
   const userInitial = (user?.company_name || user?.email || "T").trim().charAt(0).toUpperCase();
 
@@ -64,12 +65,10 @@ export default function Shell({ children }) {
       <div className="flex min-h-screen">
         <aside className="hidden w-64 shrink-0 border-r border-border-subtle bg-bg-surface/80 p-4 lg:block">
           <div className="mb-8 flex items-center gap-3 p-2">
-            <span className="grid h-10 w-10 place-items-center rounded-lg bg-accent-primary text-white shadow-glow-indigo">
-              <Activity size={21} />
-            </span>
+            <img src={brandLogo} alt="TFCRM" className="h-10 w-10 rounded-lg border border-border-subtle object-cover shadow-glow-indigo" />
             <div>
-              <b className="text-[17px]">TalentForge</b>
-              <p className="text-sm text-text-secondary">Success intelligence</p>
+              <b className="text-[17px]">TFCRM</b>
+              <p className="text-sm text-text-secondary">Customer success</p>
             </div>
           </div>
           <p className="eyebrow px-3 pb-3">Workspace</p>
@@ -83,9 +82,7 @@ export default function Shell({ children }) {
           <header className="border-b border-border-subtle bg-bg-base/85 px-5 py-4 backdrop-blur-md lg:px-10">
             <div className="flex min-h-10 items-center justify-between gap-4">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent-primary text-white lg:hidden">
-                  <Activity size={18} />
-                </span>
+                <img src={brandLogo} alt="TFCRM" className="h-9 w-9 shrink-0 rounded-lg border border-border-subtle object-cover lg:hidden" />
                 <div className="min-w-0">
                   <p className="truncate font-semibold">{user?.company_name || "Customer Success Hub"}</p>
                   <p className="truncate text-sm text-text-secondary">{user?.email}</p>
@@ -99,12 +96,12 @@ export default function Shell({ children }) {
                   </span>
                 )}
                 <ThemeToggle />
-                <span title={user?.email} className="grid h-10 w-10 place-items-center rounded-lg bg-bg-hover font-semibold text-text-secondary">
-                  {userInitial}
-                </span>
-                <button type="button" onClick={logout} title="Sign out" aria-label="Sign out" className="grid h-10 w-10 place-items-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-text-primary">
-                  <LogOut size={18} />
-                </button>
+                <div className="relative">
+                  <button type="button" onClick={() => setProfileOpen((open) => !open)} title="Open profile menu" aria-label="Open profile menu" className="grid h-10 w-10 place-items-center rounded-lg bg-bg-hover font-semibold text-text-secondary hover:bg-blue-500/15 hover:text-blue-600">
+                    {userInitial}
+                  </button>
+                  {profileOpen && <div className="absolute right-0 z-50 mt-2 w-64 rounded-lg border border-border bg-bg-card p-2 shadow-2xl"><div className="border-b border-border-subtle px-3 py-3"><p className="truncate font-medium">{user?.company_name || "Your workspace"}</p><p className="mt-1 truncate text-xs text-text-secondary">{user?.email}</p></div><Link to="/settings" onClick={() => setProfileOpen(false)} className="mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary"><Settings size={16} />Profile and settings</Link>{user?.role === "admin" && <Link to="/admin" onClick={() => setProfileOpen(false)} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary"><Users size={16} />Admin workspace</Link>}<button type="button" onClick={logout} className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-rose-500 hover:bg-rose-500/10"><LogOut size={16} />Sign out</button></div>}
+                </div>
               </div>
             </div>
             <nav className="mt-4 -mx-2 flex gap-1 overflow-x-auto border-t border-border-subtle pt-3 lg:hidden">
