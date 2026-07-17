@@ -5,12 +5,33 @@
 @tailwind utilities;
 
 :root {
+  --tf-bg-base: 7 20 31;
+  --tf-bg-surface: 11 28 40;
+  --tf-bg-card: 15 36 50;
+  --tf-bg-hover: 20 47 64;
+  --tf-border: 44 74 91;
+  --tf-border-subtle: 30 59 75;
+  --tf-text-primary: 239 248 250;
+  --tf-text-secondary: 159 185 193;
+  --tf-text-muted: 104 142 153;
   font-family: "Outfit", sans-serif;
   font-size: 16px;
-  color: #e2e8f0;
-  background: #020617;
+  color: rgb(var(--tf-text-primary));
+  background: rgb(var(--tf-bg-base));
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="light"] {
+  --tf-bg-base: 244 250 252;
+  --tf-bg-surface: 255 255 255;
+  --tf-bg-card: 255 255 255;
+  --tf-bg-hover: 231 245 246;
+  --tf-border: 186 213 218;
+  --tf-border-subtle: 215 233 235;
+  --tf-text-primary: 14 38 48;
+  --tf-text-secondary: 61 95 105;
+  --tf-text-muted: 98 128 136;
 }
 
 * {
@@ -21,17 +42,30 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  background: #020617;
+  background: rgb(var(--tf-bg-base));
+  color: rgb(var(--tf-text-primary));
+  transition: background-color 180ms ease, color 180ms ease;
   font-size: 1rem;
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
+button {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
 .glass-card {
-  @apply min-h-[120px] border border-slate-800/80 bg-slate-900/60 p-6 shadow-xl shadow-slate-950/20 backdrop-blur-md;
+  @apply min-h-[120px] border border-border-subtle bg-bg-card/90 p-6 shadow-xl backdrop-blur-md;
+  box-shadow: 0 16px 34px -28px rgba(15, 23, 42, 0.55);
 }
 
 .glow-indigo {
@@ -54,4 +88,37 @@ input {
 
 .animate-pulse-glow {
   animation: pulse-glow 2.4s ease-in-out infinite;
+}
+
+.eyebrow {
+  @apply text-xs font-semibold uppercase text-text-secondary;
+}
+
+.metric-card {
+  @apply glass-card relative overflow-hidden rounded-lg;
+}
+
+.metric-card::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 56px;
+  height: 3px;
+  content: "";
+  background: currentColor;
+  opacity: 0.9;
+}
+
+.login-backdrop {
+  background-image: linear-gradient(90deg, rgba(9, 11, 18, 0.98) 0%, rgba(9, 11, 18, 0.78) 42%, rgba(9, 11, 18, 0.28) 100%), url("https://images.unsplash.com/photo-1556761175-b413da4baf72?auto=format&fit=crop&w=2200&q=85");
+  background-position: center;
+  background-size: cover;
+}
+
+:root[data-theme="light"] .login-backdrop {
+  background-image: linear-gradient(90deg, rgba(246, 248, 252, 0.98) 0%, rgba(246, 248, 252, 0.85) 42%, rgba(246, 248, 252, 0.33) 100%), url("https://images.unsplash.com/photo-1556761175-b413da4baf72?auto=format&fit=crop&w=2200&q=85");
+}
+
+:root[data-theme="light"] .glass-card {
+  box-shadow: 0 18px 38px -30px rgba(15, 23, 42, 0.38);
 }

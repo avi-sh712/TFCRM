@@ -1,5 +1,7 @@
 const base = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
+export const apiBaseUrl = base;
+
 export const token = () => localStorage.getItem("talentforge_token");
 
 export class ApiError extends Error {
