@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from html import escape
 from typing import Annotated, Literal
 from uuid import UUID
@@ -19,6 +20,7 @@ from talentforge.email_service import send_outreach_email
 
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
+logger = logging.getLogger("talentforge.campaigns")
 
 CampaignReviewer = Annotated[
     User,
@@ -80,12 +82,23 @@ async def _dispatch_campaign(campaign_id: UUID) -> None:
         subject = _campaign_subject(campaign.message_template)
         html = _campaign_html(campaign.message_template)
         sent_count = 0
+        failed_count = 0
         for customer in customers.scalars().all():
-            if customer.contact_email:
+            if not customer.contact_email:
+                failed_count += 1
+                continue
+            try:
                 await send_outreach_email(customer.contact_email, subject, html)
                 sent_count += 1
+            except Exception:
+                failed_count += 1
+                logger.exception(
+                    "campaign_delivery_failed campaign_id=%s customer_id=%s",
+                    campaign.id,
+                    customer.id,
+                )
         campaign.sent_count += sent_count
-        campaign.status = "completed"
+        campaign.status = "failed" if failed_count or sent_count != len(customer_ids) else "completed"
 
 
 @router.get("", response_model=list[Campaign])

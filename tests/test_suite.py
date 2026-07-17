@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from jose import jwt
 
-from talentforge import auth, graph_engine, ingestion
+from talentforge import auth, email_service, graph_engine, ingestion
 
 
 JWT_SECRET = "t" * 48
@@ -105,3 +105,51 @@ async def test_company_agent_graph_awaits_async_node_factory() -> None:
     )
 
     assert result["output"] == {"company_id": "customer-1"}
+
+
+@pytest.mark.asyncio
+async def test_resend_adapter_uses_expected_request_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"id": "email_123"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["timeout"] == 15.0
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs: object) -> FakeResponse:
+            requests.append({"url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "TalentForge <onboarding@resend.dev>")
+    monkeypatch.setattr(email_service.httpx, "AsyncClient", FakeClient)
+
+    message_id = await email_service.send_outreach_email(
+        "owner@example.com", "A quick check-in", "<p>Hello</p>"
+    )
+
+    assert message_id == "email_123"
+    assert requests == [{
+        "url": email_service.RESEND_EMAILS_URL,
+        "headers": {"Authorization": "Bearer re_test_key"},
+        "json": {
+            "from": "TalentForge <onboarding@resend.dev>",
+            "to": ["owner@example.com"],
+            "subject": "A quick check-in",
+            "html": "<p>Hello</p>",
+        },
+    }]
