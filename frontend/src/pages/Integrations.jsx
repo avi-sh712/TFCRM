@@ -52,12 +52,13 @@ export default function Integrations() {
   async function uploadCsv(event) {
     event.preventDefault();
     if (!file || uploading) return;
+    const form = event.currentTarget;
     setUploading(true); setError(""); setNotice("");
     try {
-      const form = new FormData(); form.append("file", file);
-      const result = await api("/api/integrations/csv-upload", { method: "POST", body: form });
+      const requestBody = new FormData(); requestBody.append("file", file);
+      const result = await api("/api/integrations/csv-upload", { method: "POST", body: requestBody });
       setNotice(`Import ${String(result.id).slice(0, 8)} is queued and continues in the background.`);
-      setFile(null); event.currentTarget.reset(); await load(); setError("");
+      setFile(null); form.reset(); await load(); setError("");
     } catch (cause) { setError(cause.message); } finally { setUploading(false); }
   }
 
