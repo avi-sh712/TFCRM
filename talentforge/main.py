@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from talentforge.auth import router as auth_router
 from talentforge.admin import router as admin_router
+from talentforge.activity import router as activity_router
 from talentforge.agents import router as agents_router
 from talentforge.agents import agent_run_dispatcher
 from talentforge.campaigns import router as campaigns_router
@@ -41,6 +42,8 @@ def _allowed_origins() -> list[str]:
         # Always allow local Vite dev server
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
     # Add production origin if configured and valid
     prod = os.getenv(
@@ -106,6 +109,7 @@ app.include_router(deals_router)
 app.include_router(agents_router)
 app.include_router(integrations_router)
 app.include_router(admin_router)
+app.include_router(activity_router)
 app.include_router(stats_router)
 
 static_dir = Path(os.getenv("TALENTFORGE_STATIC_DIR", "talentforge/static"))

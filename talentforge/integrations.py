@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 from contextlib import suppress
@@ -14,13 +15,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from talentforge.auth import get_current_user
 from talentforge.db.database import get_db_session, session_scope
-from talentforge.db.models import CustomerHealthHistory, CustomerProfile, DataSource, ImportJob, User, WebhookEvent
+from talentforge.db.models import CustomerHealthHistory, CustomerProfile, DataSource, ImportJob, InteractionHistory, User, WebhookEvent
 from talentforge.ingestion import parse_customer_csv
 
 
@@ -29,7 +30,17 @@ logger = logging.getLogger("talentforge.integrations")
 CurrentUser = Annotated[User, Depends(get_current_user())]
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 WEBHOOK_SIGNATURE_HEADER = "X-TalentForge-Webhook-Signature"
-SUPPORTED_WEBHOOK_EVENTS = {"user.login", "user.churn_signal", "subscription.cancelled", "support.ticket.opened"}
+SUPPORTED_WEBHOOK_EVENTS = {
+    "user.login",
+    "user.churn_signal",
+    "subscription.cancelled",
+    "support.ticket.opened",
+    "customer.created",
+    "customer.updated",
+    "order.created",
+    "order.paid",
+    "order.cancelled",
+}
 IMPORT_DISPATCH_POLL_SECONDS = 3.0
 
 
@@ -43,6 +54,104 @@ class WebhookEventIn(BaseModel):
     event_type: str
     customer_id: UUID | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def _as_nonnegative_float(value: object) -> float | None:
+    try:
+        return max(0.0, float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_nonnegative_int(value: object) -> int | None:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_customer_fields(payload: dict[str, Any]) -> dict[str, object]:
+    """Normalize a vendor-neutral customer object without retaining store credentials."""
+    customer = payload.get("customer")
+    customer = customer if isinstance(customer, dict) else {}
+    billing = payload.get("billing")
+    billing = billing if isinstance(billing, dict) else {}
+    first_name = str(customer.get("first_name") or billing.get("first_name") or "").strip()
+    last_name = str(customer.get("last_name") or billing.get("last_name") or "").strip()
+    name = str(customer.get("name") or payload.get("customer_name") or "").strip()
+    if not name:
+        name = " ".join(part for part in (first_name, last_name) if part).strip()
+    email = str(customer.get("email") or billing.get("email") or payload.get("email") or "").strip().lower()
+    phone = str(customer.get("phone") or billing.get("phone") or payload.get("phone") or "").strip()
+    return {
+        "name": name or email.split("@", 1)[0] or "Store customer",
+        "email": email or None,
+        "phone": phone or None,
+        "lifetime_value": _as_nonnegative_float(
+            customer.get("total_spent", customer.get("lifetime_value", payload.get("total_spent")))
+        ),
+        "purchase_count": _as_nonnegative_int(
+            customer.get("orders_count", customer.get("purchase_count", payload.get("orders_count")))
+        ),
+    }
+
+
+async def _upsert_store_customer(
+    session: AsyncSession,
+    company_id: UUID,
+    payload: dict[str, Any],
+) -> CustomerProfile:
+    fields = _store_customer_fields(payload)
+    email = fields["email"]
+    if not email and fields["name"] == "Store customer":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Store events must include a customer name or email.",
+        )
+    customer: CustomerProfile | None = None
+    if isinstance(email, str):
+        result = await session.execute(
+            select(CustomerProfile)
+            .where(
+                CustomerProfile.company_id == company_id,
+                func.lower(CustomerProfile.contact_email) == email,
+            )
+            .limit(1)
+        )
+        customer = result.scalar_one_or_none()
+
+    if customer is None:
+        customer = CustomerProfile(
+            company_id=company_id,
+            company_name=str(fields["name"]),
+            contact_email=email if isinstance(email, str) else None,
+            phone=fields["phone"] if isinstance(fields["phone"], str) else None,
+            status="healthy",
+            health_score=80,
+            lifetime_value=float(fields["lifetime_value"] or 0),
+            purchase_count=int(fields["purchase_count"] or 0),
+            tags=["store_sync"],
+        )
+        session.add(customer)
+        await session.flush()
+        session.add(
+            CustomerHealthHistory(
+                customer_id=customer.id,
+                health_score=customer.health_score,
+                reason="Customer created from a store sync.",
+            )
+        )
+        return customer
+
+    if isinstance(fields["phone"], str):
+        customer.phone = fields["phone"]
+    if fields["lifetime_value"] is not None:
+        customer.lifetime_value = max(customer.lifetime_value, float(fields["lifetime_value"]))
+    if fields["purchase_count"] is not None:
+        customer.purchase_count = max(customer.purchase_count, int(fields["purchase_count"]))
+    if "store_sync" not in (customer.tags or []):
+        customer.tags = [*(customer.tags or []), "store_sync"]
+    return customer
 
 
 class DataSourceResponse(BaseModel):
@@ -312,6 +421,26 @@ async def create_webhook_source(
     return _source_response(source, include_webhook_secret=True)
 
 
+@router.post("/commerce-webhook-source", response_model=DataSourceResponse, status_code=status.HTTP_201_CREATED)
+async def create_commerce_webhook_source(
+    session: DatabaseSession,
+    current_user: CurrentUser,
+) -> DataSourceResponse:
+    source = DataSource(
+        company_id=current_user.id,
+        type="commerce_webhook",
+        name="Store customer sync",
+        config={
+            "webhook_secret": secrets.token_urlsafe(32),
+            "accepted_events": ["customer.created", "customer.updated", "order.created", "order.paid"],
+        },
+    )
+    session.add(source)
+    await session.commit()
+    await session.refresh(source)
+    return _source_response(source, include_webhook_secret=True)
+
+
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_integration(
     source_id: UUID,
@@ -334,7 +463,10 @@ async def ingest_company_webhook(
 ) -> dict[str, str]:
     raw_body = await request.body()
     sources = await session.execute(
-        select(DataSource).where(DataSource.company_id == company_id, DataSource.type == "api_webhook")
+        select(DataSource).where(
+            DataSource.company_id == company_id,
+            DataSource.type.in_(["api_webhook", "commerce_webhook"]),
+        )
     )
     valid_source = None
     for source in sources.scalars().all():
@@ -349,10 +481,17 @@ async def ingest_company_webhook(
     event = WebhookEventIn.model_validate_json(raw_body)
     if event.event_type not in SUPPORTED_WEBHOOK_EVENTS:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported webhook event.")
-    if event.customer_id is not None:
-        customer = await session.get(CustomerProfile, event.customer_id)
+    customer_id = event.customer_id
+    customer: CustomerProfile | None = None
+    if customer_id is not None:
+        customer = await session.get(CustomerProfile, customer_id)
         if customer is None or customer.company_id != company_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+    elif event.event_type in {"customer.created", "customer.updated", "order.created", "order.paid"}:
+        customer = await _upsert_store_customer(session, company_id, event.payload)
+        customer_id = customer.id
+
+    if customer is not None:
         if event.event_type in {"user.churn_signal", "subscription.cancelled"}:
             customer.status = "at_risk"
             customer.health_score = max(0, customer.health_score - 20)
@@ -361,7 +500,14 @@ async def ingest_company_webhook(
                 health_score=customer.health_score,
                 reason=f"Webhook event: {event.event_type}.",
             ))
-    session.add(WebhookEvent(company_id=company_id, customer_id=event.customer_id, event_type=event.event_type, payload=event.payload))
+        session.add(
+            InteractionHistory(
+                customer_id=customer.id,
+                event_type=f"store.{event.event_type}",
+                raw_payload=json.dumps(event.payload, ensure_ascii=True),
+            )
+        )
+    session.add(WebhookEvent(company_id=company_id, customer_id=customer_id, event_type=event.event_type, payload=event.payload))
     valid_source.last_sync = datetime.now(timezone.utc)
     await session.commit()
     return {"status": "accepted"}

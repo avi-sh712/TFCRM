@@ -5,15 +5,15 @@
 @tailwind utilities;
 
 :root {
-  --tf-bg-base: 9 11 18;
-  --tf-bg-surface: 17 19 24;
-  --tf-bg-card: 22 25 32;
-  --tf-bg-hover: 30 32 40;
-  --tf-border: 42 45 56;
-  --tf-border-subtle: 30 32 40;
-  --tf-text-primary: 240 242 247;
-  --tf-text-secondary: 148 163 184;
-  --tf-text-muted: 100 116 139;
+  --tf-bg-base: 7 20 31;
+  --tf-bg-surface: 11 28 40;
+  --tf-bg-card: 15 36 50;
+  --tf-bg-hover: 20 47 64;
+  --tf-border: 44 74 91;
+  --tf-border-subtle: 30 59 75;
+  --tf-text-primary: 239 248 250;
+  --tf-text-secondary: 159 185 193;
+  --tf-text-muted: 104 142 153;
   font-family: "Outfit", sans-serif;
   font-size: 16px;
   color: rgb(var(--tf-text-primary));
@@ -23,15 +23,15 @@
 }
 
 :root[data-theme="light"] {
-  --tf-bg-base: 246 248 252;
+  --tf-bg-base: 244 250 252;
   --tf-bg-surface: 255 255 255;
   --tf-bg-card: 255 255 255;
-  --tf-bg-hover: 238 242 255;
-  --tf-border: 203 213 225;
-  --tf-border-subtle: 226 232 240;
-  --tf-text-primary: 15 23 42;
-  --tf-text-secondary: 71 85 105;
-  --tf-text-muted: 100 116 139;
+  --tf-bg-hover: 231 245 246;
+  --tf-border: 186 213 218;
+  --tf-border-subtle: 215 233 235;
+  --tf-text-primary: 14 38 48;
+  --tf-text-secondary: 61 95 105;
+  --tf-text-muted: 98 128 136;
 }
 
 * {
