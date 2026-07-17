@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from talentforge.auth import get_current_user
+from talentforge.auth import get_current_user, workspace_id_for
 from talentforge.db.database import get_db_session
 from talentforge.db.models import (
     AgentAuditLog,
@@ -53,30 +53,30 @@ async def list_workspace_activity(
     """Return a concise, tenant-safe feed of CRM and AI operational changes."""
     runs = list((await session.execute(
         select(AgentRun)
-        .where(AgentRun.company_id == current_user.id)
+        .where(AgentRun.company_id == workspace_id_for(current_user))
         .order_by(AgentRun.created_at.desc())
         .limit(12)
     )).scalars().all())
     campaigns = list((await session.execute(
         select(Campaign)
-        .where(Campaign.company_id == current_user.id)
+        .where(Campaign.company_id == workspace_id_for(current_user))
         .order_by(Campaign.created_at.desc())
         .limit(8)
     )).scalars().all())
     imports = list((await session.execute(
         select(ImportJob)
-        .where(ImportJob.company_id == current_user.id)
+        .where(ImportJob.company_id == workspace_id_for(current_user))
         .order_by(ImportJob.created_at.desc())
         .limit(8)
     )).scalars().all())
     events = list((await session.execute(
         select(WebhookEvent)
-        .where(WebhookEvent.company_id == current_user.id)
+        .where(WebhookEvent.company_id == workspace_id_for(current_user))
         .order_by(WebhookEvent.created_at.desc())
         .limit(8)
     )).scalars().all())
     customer_ids = [str(customer_id) for customer_id in (await session.execute(
-        select(CustomerProfile.id).where(CustomerProfile.company_id == current_user.id)
+        select(CustomerProfile.id).where(CustomerProfile.company_id == workspace_id_for(current_user))
     )).scalars().all()]
     audits: list[AgentAuditLog] = []
     if customer_ids:

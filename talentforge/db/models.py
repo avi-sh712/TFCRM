@@ -75,10 +75,19 @@ class User(TimestampMixin, table=True):
         UniqueConstraint("email", name="uq_users_email"),
         UniqueConstraint("username", name="uq_users_username"),
         Index("ix_users_email", "email"),
+        Index("ix_users_workspace_id", "workspace_id"),
     )
 
     email: str = Field(max_length=320, nullable=False)
     username: str | None = Field(default=None, max_length=32, nullable=True)
+    workspace_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(
+            PG_UUID(as_uuid=True),
+            ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
+    )
     hashed_password: str = Field(max_length=255, nullable=False)
     role: UserRole = Field(
         default=UserRole.COMPANY,

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
 from sqlmodel import select
 
-from talentforge.auth import get_current_user
+from talentforge.auth import get_current_active_user, get_current_user, workspace_id_for
 from talentforge.db.database import get_db_session, session_scope
 from talentforge.db.models import AgentRun, User
 from talentforge.graph_engine import postgres_checkpointer, run_company_agent
@@ -26,6 +26,7 @@ from talentforge.ingestion import agent_stream_manager
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 logger = logging.getLogger("talentforge.agents")
 CurrentUser = Annotated[User, Depends(get_current_user())]
+WorkspaceEditor = Annotated[User, Depends(get_current_active_user(["company", "csm", "admin"]))]
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 AgentType = Literal["churn_analysis", "root_cause", "outreach_draft", "health_scoring"]
 DISPATCH_POLL_SECONDS = 3.0
@@ -178,10 +179,10 @@ async def create_agent_run(
     payload: AgentRunRequest,
     background_tasks: BackgroundTasks,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> AgentRun:
-    company_id = payload.company_id or current_user.id
-    if company_id != current_user.id:
+    company_id = payload.company_id or workspace_id_for(current_user)
+    if company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Company scope mismatch.")
     run = AgentRun(company_id=company_id, type=payload.type, input=payload.config)
     session.add(run)
@@ -195,7 +196,7 @@ async def create_agent_run(
 async def list_agent_runs(session: DatabaseSession, current_user: CurrentUser) -> list[AgentRun]:
     result = await session.execute(
         select(AgentRun)
-        .where(AgentRun.company_id == current_user.id)
+        .where(AgentRun.company_id == workspace_id_for(current_user))
         .order_by(AgentRun.created_at.desc())
         .limit(100)
     )
@@ -209,7 +210,7 @@ async def get_agent_run(
     current_user: CurrentUser,
 ) -> AgentRun:
     run = await session.get(AgentRun, run_id)
-    if run is None or run.company_id != current_user.id:
+    if run is None or run.company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent run not found.")
     return run
 
@@ -218,10 +219,10 @@ async def get_agent_run(
 async def cancel_agent_run(
     run_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> AgentRun:
     run = await session.get(AgentRun, run_id)
-    if run is None or run.company_id != current_user.id:
+    if run is None or run.company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent run not found.")
     if run.status not in {"queued", "running"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only queued or running agent runs can be cancelled.")

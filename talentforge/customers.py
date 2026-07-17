@@ -13,7 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from talentforge.auth import get_current_user
+from talentforge.auth import get_current_active_user, get_current_user, workspace_id_for
 from talentforge.db.database import get_db_session
 from talentforge.db.models import (
     CampaignStatus,
@@ -28,6 +28,7 @@ from talentforge.graph_engine import score_customer_risk
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
 CurrentUser = Annotated[User, Depends(get_current_user())]
+WorkspaceEditor = Annotated[User, Depends(get_current_active_user(["company", "csm", "admin"]))]
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
@@ -68,7 +69,7 @@ async def _owned_customer(
     user: User,
 ) -> CustomerProfile:
     customer = await session.get(CustomerProfile, customer_id)
-    if customer is None or customer.company_id != user.id:
+    if customer is None or customer.company_id != workspace_id_for(user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
     return customer
 
@@ -82,7 +83,7 @@ async def list_customers(
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
-    statement = select(CustomerProfile).where(CustomerProfile.company_id == current_user.id)
+    statement = select(CustomerProfile).where(CustomerProfile.company_id == workspace_id_for(current_user))
     if status_filter:
         statement = statement.where(CustomerProfile.status == status_filter)
     if tag:
@@ -138,10 +139,10 @@ async def list_customers(
 async def create_customer(
     payload: CustomerCreate,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> CustomerProfile:
     customer = CustomerProfile(
-        company_id=current_user.id,
+        company_id=workspace_id_for(current_user),
         company_name=payload.name,
         contact_email=payload.email,
         phone=payload.phone,
@@ -165,7 +166,7 @@ async def create_customer(
 async def get_customer(
     customer_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> CustomerProfile:
     return await _owned_customer(session, customer_id, current_user)
 
@@ -175,7 +176,7 @@ async def update_customer(
     customer_id: UUID,
     payload: CustomerUpdate,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> CustomerProfile:
     customer = await _owned_customer(session, customer_id, current_user)
     updates = payload.model_dump(exclude_unset=True)
@@ -201,7 +202,7 @@ async def update_customer(
 async def delete_customer(
     customer_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> Response:
     customer = await _owned_customer(session, customer_id, current_user)
     await session.delete(customer)
@@ -213,7 +214,7 @@ async def delete_customer(
 async def get_health_history(
     customer_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> dict[str, object]:
     await _owned_customer(session, customer_id, current_user)
     result = await session.execute(
@@ -248,7 +249,7 @@ async def create_customer_interaction(
     customer_id: UUID,
     payload: InteractionCreate,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> InteractionHistory:
     customer = await _owned_customer(session, customer_id, current_user)
     interaction = InteractionHistory(
@@ -267,7 +268,7 @@ async def create_customer_interaction(
 async def score_customer_risk_endpoint(
     customer_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> dict[str, object]:
     await _owned_customer(session, customer_id, current_user)
     return await score_customer_risk(customer_id, session)

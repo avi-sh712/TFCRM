@@ -27,6 +27,8 @@ from talentforge.ingestion import router as ingestion_router
 from talentforge.integrations import router as integrations_router
 from talentforge.integrations import import_job_dispatcher
 from talentforge.stats import router as stats_router
+from talentforge.seed_admin import seed_admin
+from talentforge.team import router as team_router
 
 
 logger = logging.getLogger("talentforge.api")
@@ -67,6 +69,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             ).lower()
             == "true",
         )
+    if await seed_admin():
+        logger.info("Configured platform administrator is ready.")
     await agent_run_dispatcher.start()
     await import_job_dispatcher.start()
     try:
@@ -111,6 +115,7 @@ app.include_router(integrations_router)
 app.include_router(admin_router)
 app.include_router(activity_router)
 app.include_router(stats_router)
+app.include_router(team_router)
 
 static_dir = Path(os.getenv("TALENTFORGE_STATIC_DIR", "talentforge/static"))
 app.mount("/assets", StaticFiles(directory=static_dir / "assets", check_dir=False), name="assets")

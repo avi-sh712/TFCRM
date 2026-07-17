@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from talentforge.auth import get_current_active_user, get_current_user
+from talentforge.auth import get_current_active_user, get_current_user, workspace_id_for
 from talentforge.db.database import get_db_session, session_scope
 from talentforge.db.models import Campaign, CampaignStatus, CustomerProfile, OutreachCampaign, User, UserRole
 from talentforge.email_service import send_outreach_email
@@ -23,11 +23,15 @@ router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 CampaignReviewer = Annotated[
     User,
     Depends(
-        get_current_active_user([UserRole.CSM.value, UserRole.ADMIN.value])
+        get_current_active_user([UserRole.COMPANY.value, UserRole.CSM.value, UserRole.ADMIN.value])
     ),
 ]
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 CampaignOwner = Annotated[User, Depends(get_current_user())]
+CampaignEditor = Annotated[
+    User,
+    Depends(get_current_active_user([UserRole.COMPANY.value, UserRole.CSM.value, UserRole.ADMIN.value])),
+]
 
 
 class CampaignReviewRequest(BaseModel):
@@ -54,7 +58,7 @@ async def _owned_campaign(
     current_user: User,
 ) -> Campaign:
     campaign = await session.get(Campaign, campaign_id)
-    if campaign is None or campaign.company_id != current_user.id:
+    if campaign is None or campaign.company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
     return campaign
 
@@ -67,7 +71,12 @@ async def _dispatch_campaign(campaign_id: UUID) -> None:
         customer_ids = [UUID(customer_id) for customer_id in (campaign.target_segment or {}).get("customer_ids", [])]
         if not customer_ids:
             return
-        customers = await session.execute(select(CustomerProfile).where(CustomerProfile.id.in_(customer_ids)))
+        customers = await session.execute(
+            select(CustomerProfile).where(
+                CustomerProfile.id.in_(customer_ids),
+                CustomerProfile.company_id == campaign.company_id,
+            )
+        )
         subject = _campaign_subject(campaign.message_template)
         html = _campaign_html(campaign.message_template)
         sent_count = 0
@@ -85,7 +94,7 @@ async def list_campaigns(
     current_user: CampaignOwner,
     campaign_status: str | None = Query(default=None, alias="status"),
 ) -> list[Campaign]:
-    statement = select(Campaign).where(Campaign.company_id == current_user.id)
+    statement = select(Campaign).where(Campaign.company_id == workspace_id_for(current_user))
     if campaign_status:
         statement = statement.where(Campaign.status == campaign_status)
     result = await session.execute(statement.order_by(Campaign.created_at.desc()))
@@ -96,10 +105,10 @@ async def list_campaigns(
 async def create_campaign(
     payload: CampaignCreateRequest,
     session: DatabaseSession,
-    current_user: CampaignOwner,
+    current_user: CampaignEditor,
 ) -> Campaign:
     campaign = Campaign(
-        company_id=current_user.id,
+        company_id=workspace_id_for(current_user),
         name=payload.name,
         target_segment=payload.target_segment,
         message_template=payload.message_template,
@@ -113,11 +122,13 @@ async def create_campaign(
 @router.get("/pending", response_model=list[OutreachCampaign])
 async def list_pending_campaigns(
     session: DatabaseSession,
-    _: CampaignReviewer,
+    current_user: CampaignReviewer,
 ) -> list[OutreachCampaign]:
     result = await session.execute(
         select(OutreachCampaign)
+        .join(CustomerProfile, CustomerProfile.id == OutreachCampaign.customer_id)
         .where(OutreachCampaign.status == CampaignStatus.PENDING_REVIEW)
+        .where(CustomerProfile.company_id == workspace_id_for(current_user))
         .order_by(OutreachCampaign.created_at.asc())
     )
     return list(result.scalars().all())
@@ -126,17 +137,24 @@ async def list_pending_campaigns(
 @router.get("/stats")
 async def get_campaign_stats(
     session: DatabaseSession,
-    _: CampaignReviewer,
+    current_user: CampaignReviewer,
 ) -> dict[str, int]:
     async def count_status(campaign_status: CampaignStatus) -> int:
         result = await session.execute(
             select(func.count())
             .select_from(OutreachCampaign)
+            .join(CustomerProfile, CustomerProfile.id == OutreachCampaign.customer_id)
             .where(OutreachCampaign.status == campaign_status)
+            .where(CustomerProfile.company_id == workspace_id_for(current_user))
         )
         return int(result.scalar_one())
 
-    total_result = await session.execute(select(func.count()).select_from(OutreachCampaign))
+    total_result = await session.execute(
+        select(func.count())
+        .select_from(OutreachCampaign)
+        .join(CustomerProfile, CustomerProfile.id == OutreachCampaign.customer_id)
+        .where(CustomerProfile.company_id == workspace_id_for(current_user))
+    )
     return {
         "total": int(total_result.scalar_one()),
         "pending": await count_status(CampaignStatus.PENDING_REVIEW),
@@ -160,7 +178,7 @@ async def update_campaign(
     campaign_id: UUID,
     payload: CampaignUpdateRequest,
     session: DatabaseSession,
-    current_user: CampaignOwner,
+    current_user: CampaignEditor,
 ) -> Campaign:
     campaign = await _owned_campaign(session, campaign_id, current_user)
     for field_name, value in payload.model_dump(exclude_unset=True).items():
@@ -191,7 +209,7 @@ async def approve_campaign(
 async def reject_campaign(
     campaign_id: UUID,
     session: DatabaseSession,
-    current_user: CampaignOwner,
+    current_user: CampaignEditor,
 ) -> Campaign:
     campaign = await _owned_campaign(session, campaign_id, current_user)
     campaign.status = "draft"
@@ -218,6 +236,9 @@ async def review_campaign(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Campaign not found.",
         )
+    customer = await session.get(CustomerProfile, campaign.customer_id)
+    if customer is None or customer.company_id != workspace_id_for(current_user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
     if campaign.status != CampaignStatus.PENDING_REVIEW:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -234,7 +255,6 @@ async def review_campaign(
         await session.refresh(campaign)
         return campaign
 
-    customer = await session.get(CustomerProfile, campaign.customer_id)
     recipient_email = getattr(customer, "contact_email", None) if customer else None
     if not isinstance(recipient_email, str) or not recipient_email.strip():
         raise HTTPException(

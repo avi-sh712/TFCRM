@@ -19,7 +19,7 @@ from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from talentforge.auth import get_current_user
+from talentforge.auth import get_current_active_user, get_current_user, workspace_id_for
 from talentforge.db.database import get_db_session, session_scope
 from talentforge.db.models import CustomerHealthHistory, CustomerProfile, DataSource, ImportJob, InteractionHistory, User, WebhookEvent
 from talentforge.ingestion import parse_customer_csv
@@ -28,6 +28,7 @@ from talentforge.ingestion import parse_customer_csv
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger("talentforge.integrations")
 CurrentUser = Annotated[User, Depends(get_current_user())]
+WorkspaceEditor = Annotated[User, Depends(get_current_active_user(["company", "csm", "admin"]))]
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 WEBHOOK_SIGNATURE_HEADER = "X-TalentForge-Webhook-Signature"
 SUPPORTED_WEBHOOK_EVENTS = {
@@ -327,13 +328,13 @@ def _source_response(source: DataSource, *, include_webhook_secret: bool = False
 async def upload_csv(
     background_tasks: BackgroundTasks,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
     file: UploadFile = File(...),
 ) -> ImportJobResponse:
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Upload a CSV file.")
     content = (await file.read()).decode("utf-8-sig", errors="replace")
-    job = ImportJob(company_id=current_user.id, filename=file.filename[:255], raw_csv=content)
+    job = ImportJob(company_id=workspace_id_for(current_user), filename=file.filename[:255], raw_csv=content)
     session.add(job)
     await session.commit()
     await session.refresh(job)
@@ -348,7 +349,7 @@ async def list_csv_jobs(
 ) -> list[ImportJobResponse]:
     result = await session.execute(
         select(ImportJob)
-        .where(ImportJob.company_id == current_user.id)
+        .where(ImportJob.company_id == workspace_id_for(current_user))
         .order_by(ImportJob.created_at.desc())
         .limit(20)
     )
@@ -359,10 +360,10 @@ async def list_csv_jobs(
 async def cancel_csv_job(
     job_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> ImportJobResponse:
     job = await session.get(ImportJob, job_id)
-    if job is None or job.company_id != current_user.id:
+    if job is None or job.company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Import job not found.")
     if job.status not in {"queued", "running"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only queued or running imports can be cancelled.")
@@ -380,7 +381,7 @@ async def cancel_csv_job(
 async def list_integrations(session: DatabaseSession, current_user: CurrentUser) -> list[DataSourceResponse]:
     result = await session.execute(
         select(DataSource)
-        .where(DataSource.company_id == current_user.id)
+        .where(DataSource.company_id == workspace_id_for(current_user))
         .order_by(DataSource.created_at.desc())
     )
     return [_source_response(source) for source in result.scalars().all()]
@@ -390,10 +391,10 @@ async def list_integrations(session: DatabaseSession, current_user: CurrentUser)
 async def register_mcp_connector(
     payload: MCPConnectorRequest,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> DataSourceResponse:
     source = DataSource(
-        company_id=current_user.id,
+        company_id=workspace_id_for(current_user),
         type="mcp_connector",
         name=payload.name,
         config={"server_url": payload.server_url, "allowed_tools": payload.allowed_tools},
@@ -407,10 +408,10 @@ async def register_mcp_connector(
 @router.post("/webhook-source", response_model=DataSourceResponse, status_code=status.HTTP_201_CREATED)
 async def create_webhook_source(
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> DataSourceResponse:
     source = DataSource(
-        company_id=current_user.id,
+        company_id=workspace_id_for(current_user),
         type="api_webhook",
         name="Inbound product events",
         config={"webhook_secret": secrets.token_urlsafe(32)},
@@ -424,10 +425,10 @@ async def create_webhook_source(
 @router.post("/commerce-webhook-source", response_model=DataSourceResponse, status_code=status.HTTP_201_CREATED)
 async def create_commerce_webhook_source(
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> DataSourceResponse:
     source = DataSource(
-        company_id=current_user.id,
+        company_id=workspace_id_for(current_user),
         type="commerce_webhook",
         name="Store customer sync",
         config={
@@ -445,10 +446,10 @@ async def create_commerce_webhook_source(
 async def delete_integration(
     source_id: UUID,
     session: DatabaseSession,
-    current_user: CurrentUser,
+    current_user: WorkspaceEditor,
 ) -> None:
     source = await session.get(DataSource, source_id)
-    if source is None or source.company_id != current_user.id:
+    if source is None or source.company_id != workspace_id_for(current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found.")
     await session.delete(source)
     await session.commit()

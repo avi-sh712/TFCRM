@@ -12,12 +12,12 @@ from talentforge.db.database import session_scope
 from talentforge.db.models import User, UserRole
 
 
-async def seed_admin() -> None:
+async def seed_admin() -> bool:
     email = os.getenv("ADMIN_EMAIL", "").strip().lower()
     password = os.getenv("ADMIN_PASSWORD", "")
     username = os.getenv("ADMIN_USERNAME", email.partition("@")[0])
     if not email or not password:
-        raise RuntimeError("ADMIN_EMAIL and ADMIN_PASSWORD must be configured.")
+        return False
 
     try:
         hashed_password = hash_password(password)
@@ -29,19 +29,23 @@ async def seed_admin() -> None:
         result = await session.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
         if user is None:
-            session.add(
-                User(
-                    email=email,
-                    username=username,
-                    hashed_password=hashed_password,
-                    role=UserRole.ADMIN,
-                    company_name="TalentForge Admin",
-                )
+            user = User(
+                email=email,
+                username=username,
+                hashed_password=hashed_password,
+                role=UserRole.ADMIN,
+                company_name="TalentForge Admin",
             )
-            return
+            session.add(user)
+            await session.flush()
+            user.workspace_id = user.id
+            return True
         user.role = UserRole.ADMIN
         user.username = username
         user.hashed_password = hashed_password
+        if user.workspace_id is None:
+            user.workspace_id = user.id
+        return True
 
 
 if __name__ == "__main__":

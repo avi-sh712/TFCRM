@@ -35,7 +35,7 @@ export default function Integrations() {
   const [creatingStore, setCreatingStore] = useState(false);
   const [cancellingId, setCancellingId] = useState("");
   const [deletingId, setDeletingId] = useState("");
-  const endpoint = `${apiBaseUrl || window.location.origin}/api/integrations/webhook/${user?.id || "your-workspace-id"}`;
+  const endpoint = `${apiBaseUrl || window.location.origin}/api/integrations/webhook/${user?.workspace_id || user?.id || "your-workspace-id"}`;
 
   const load = async () => {
     try {

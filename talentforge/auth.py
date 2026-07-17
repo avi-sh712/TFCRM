@@ -100,6 +100,7 @@ class AuthenticatedUserResponse(BaseModel):
     role: UserRole
     company_name: str | None
     plan: str
+    workspace_id: UUID
 
 
 class TokenResponse(BaseModel):
@@ -247,7 +248,7 @@ def create_access_token(user: User) -> str:
         {
             "sub": str(user.id),
             "role": role.value,
-            "company_id": str(user.id),
+            "company_id": str(workspace_id_for(user)),
             "scope": f"role:{role.value}",
             "type": "access",
             "iss": settings.issuer,
@@ -334,7 +335,7 @@ async def _resolve_authenticated_user(
         _log_security_event(logging.WARNING, "suspended_user_access_denied")
         raise _credentials_exception()
 
-    if user.id != token_claims.company_id:
+    if workspace_id_for(user) != token_claims.company_id:
         _log_security_event(logging.WARNING, "token_company_mismatch")
         raise _credentials_exception()
 
@@ -396,6 +397,11 @@ def get_current_user() -> Callable[..., Awaitable[User]]:
     return get_current_active_user()
 
 
+def workspace_id_for(user: User) -> UUID:
+    """Return the CRM workspace a user belongs to, including legacy owner rows."""
+    return user.workspace_id or user.id
+
+
 def require_admin() -> Callable[..., Awaitable[User]]:
     """FastAPI dependency for administrative CRM operations."""
     return get_current_active_user([UserRole.ADMIN.value])
@@ -411,6 +417,7 @@ def _token_response(user: User) -> TokenResponse:
             role=user.role,
             company_name=user.company_name,
             plan=user.plan,
+            workspace_id=workspace_id_for(user),
         ),
     )
 
@@ -433,6 +440,8 @@ async def signup(
     )
     session.add(user)
     try:
+        await session.flush()
+        user.workspace_id = user.id
         await session.commit()
     except IntegrityError:
         await session.rollback()
