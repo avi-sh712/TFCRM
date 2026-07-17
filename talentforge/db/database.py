@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -52,14 +53,21 @@ APP_READONLY_ROLE_SQL: tuple[str, ...] = (
 
 
 def _normalize_database_url(url: str) -> str:
-    """Convert common PostgreSQL URLs to SQLAlchemy's asyncpg dialect."""
-    if url.startswith("postgresql+asyncpg://"):
-        return url
+    """Convert standard Neon URLs into an asyncpg-compatible SQLAlchemy URL."""
     if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgres://")
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgresql://")
-    return url
+        url = "postgresql+asyncpg://" + url.removeprefix("postgres://")
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url.removeprefix("postgresql://")
+
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    sslmode = query.pop("sslmode", None)
+    query.pop("channel_binding", None)
+    if sslmode is not None and "ssl" not in query:
+        # asyncpg accepts `ssl`; libpq's `sslmode` is not a valid asyncpg kwarg.
+        query["ssl"] = "false" if sslmode == "disable" else "require"
+
+    return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
 def get_database_url() -> str:
