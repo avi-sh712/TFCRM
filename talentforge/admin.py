@@ -87,6 +87,15 @@ async def suspend_company(company_id: UUID, session: DatabaseSession, _: AdminUs
     return _safe_user(company)
 
 
+@router.patch("/companies/{company_id}/restore", response_model=AdminUserResponse)
+async def restore_company(company_id: UUID, session: DatabaseSession, _: AdminUser) -> AdminUserResponse:
+    company = await _company_or_404(session, company_id)
+    company.suspended = False
+    await session.commit()
+    await session.refresh(company)
+    return _safe_user(company)
+
+
 @router.patch("/companies/{company_id}/plan", response_model=AdminUserResponse)
 async def update_company_plan(company_id: UUID, payload: PlanUpdate, session: DatabaseSession, _: AdminUser) -> AdminUserResponse:
     company = await _company_or_404(session, company_id)
